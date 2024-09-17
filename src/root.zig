@@ -17,9 +17,16 @@ pub const OwnedArgs = tokenizer.OwnedArgs;
 pub const Tokenizer = tokenizer.Tokenizer;
 
 pub const Help = struct {
+    /// Whether to automatically create a short flag (`-h`) that prints a
+    /// help string describing the program and exits gracefully.
     short: bool = true,
+    /// Whether to automatically create a long flag (`--help`) that prints
+    /// a help string describing the program and exits gracefully.
     long: bool = true,
+    /// Whether to automatically create a command (`help`) that prints
+    /// a help string describing the program and exits gracefully.
     command: bool = false,
+    /// An description of the program or (sub)command's function or usage.
     info: ?[]const u8 = null,
 };
 
@@ -37,8 +44,9 @@ pub const Mode = union(enum(u1)) {
     standard: []const Positional,
 };
 
+/// TODO implement fix suggestions
 pub const Fixes = struct {
-    const FixMode = enum(u2) {
+    pub const FixMode = enum(u2) {
         /// Only check character differences when comparing two flags or commands. This
         /// may miss more fine-grained errors, such as the difference between a typoed 'b'
         /// character that was supposed to be an 'a' character.
@@ -51,8 +59,10 @@ pub const Fixes = struct {
         /// `-` or `--` character sequences in a flag or command.
         advanced,
     };
+    /// Whether to enable fix suggestions for flag and command entries.
     enable: bool = true,
-    mode: FixMode,
+    /// The algorithm(s) to use when suggesting fixes.
+    mode: FixMode = .advanced,
     diff_threshold: u32,
     /// Whether to inform the user of the correct type of a flag or
     /// positional if they entered an incorrect one. Also suggests
@@ -152,6 +162,21 @@ pub const Flag = struct {
     alt_type_name: ?[]const u8 = null,
 };
 
+pub const Positional = struct {
+    /// The string that will be displayed in parentheses or braces in the CLI's help message.
+    display: []const u8,
+    /// The string that will identify the positional's field in the resulting struct.
+    field_name: [:0]const u8,
+    /// The positional's type. Can *not* be `void`. May be an optional value if and only if all successive positionals are optional.
+    /// A `Multi` is permitted as this type.
+    type: type,
+    /// An alternative type name to display in the positional list. This can be used to provide more context for what a positional
+    /// represents, e.g. `"path"` instead of simply `"string"`.
+    alt_type_name: ?[]const u8 = null,
+    /// A help string describing the positional argument's use.
+    help_msg: ?[]const u8 = null,
+};
+
 /// Returns a dummy type representing a flag whose occurances should be counted.
 /// `T` *must* be an integer type. It c;an be either signed or unsigned, but must not be zero-sized
 /// (i.e. `i0` or `u0` values are not allowed). Integer overflow is handled via saturating arithmetic.
@@ -166,9 +191,8 @@ pub fn Counter(comptime T: type) type {
 }
 
 /// Returns a dummy type representing a flag that can occur multiple times in the argument list.
-/// The result will be an `ArrayListUnManaged(T)` containing the argument found with each occurrence. Optional
-/// types are *not* supported. Only legal if dynamic memory allocation is enabled, *unless* a maximum value
-/// is provided to ensure
+/// If `size != null and size.? != 0`, then space on the stack is allocated (via [std.BoundedArray]) to store `size.?` values
+/// before switching to a heap-based implementation (via [std.ArrayListUnmanaged]).
 pub fn Multi(comptime T: type, comptime size: ?usize) type {
     if (size == 0)
         @compileError("zero-length stack-based Multi is not supported; use `null` to force heap allocation");
@@ -218,18 +242,3 @@ pub fn MultiValue(comptime T: type, comptime size: ?usize) type {
         }
     } else std.ArrayListUnmanaged(T);
 }
-
-pub const Positional = struct {
-    /// The string that will be displayed in parentheses or braces in the CLI's help message.
-    display: []const u8,
-    /// The string that will identify the positional's field in the resulting struct.
-    field_name: [:0]const u8,
-    /// The positional's type. Can *not* be `void`. May be an optional value if and only if all successive positionals are optional.
-    /// A `Multi` is permitted as this type.
-    type: type,
-    /// An alternative type name to display in the positional list. This can be used to provide more context for what a positional
-    /// represents, e.g. `"path"` instead of simply `"string"`.
-    alt_type_name: ?[]const u8 = null,
-    /// A help string describing the positional argument's use.
-    help_msg: ?[]const u8 = null,
-};
