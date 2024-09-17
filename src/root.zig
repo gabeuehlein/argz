@@ -65,22 +65,16 @@ pub const Config = struct {
     pub const AnsiMode = enum(u2) {
         /// Don't use ANSI escape sequences, even if stdout/stderr support them.
         disable,
-        /// Use ANSI escape sequences if stdout/stderr support them. Currently
-        /// has no effect.
-        ///
-        /// **Note**: using this generates two near-identical variations of the
-        /// help string and any error messages which will be used depending on
-        /// whether ANSI escape sequence support was detected. Normally, this
-        /// shouldn't be a problem, but if it is, you should either use `.disable`
-        /// or `.force` instead, preferrably `.disable`.
+        /// Use ANSI escape sequences if stdout/stderr support them.
         detect,
+        /// Force the usage of ANSI escape sequences, regardless of whether stdout/stderr
+        /// support them. Note that using this is discouraged; if you don't want `argz`
+        /// to check for ANSI escape sequence support, prefer `disable` instead.
         force,
     };
     help: Help = .{},
     /// Whether to use ANSI escape sequences if it is detected that stdout/stderr
     /// supports them.
-    ///
-    /// TODO implement ANSI coloring
     ansi_mode: AnsiMode = .detect,
     /// Fix suggestion config for flags.
     ///
