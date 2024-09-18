@@ -63,7 +63,6 @@ pub const Config = struct {
     program_name: ?[]const u8 = null,
     /// A brief description of how the program should be used.
     program_description: ?[]const u8 = null,
-    /// Fix suggestion config for commands.
     /// Whether to suggest adding a `--` argument in order to
     /// make a would-be flag or command be treated as a positional instead.
     suggest_add_terminator: bool = true,
