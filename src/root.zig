@@ -44,33 +44,6 @@ pub const Mode = union(enum(u1)) {
     standard: []const Positional,
 };
 
-/// TODO implement fix suggestions
-pub const Fixes = struct {
-    pub const FixMode = enum(u2) {
-        /// Only check character differences when comparing two flags or commands. This
-        /// may miss more fine-grained errors, such as the difference between a typoed 'b'
-        /// character that was supposed to be an 'a' character.
-        simple,
-        /// Computes the [Hamming Distance](https://en.wikipedia.org/wiki/Hamming_distance)
-        /// beween two flags or commands and picks the valid flag or command with the closest
-        /// bit representation within a specified threshold.
-        hamming_dist,
-        /// Uses a Hamming Distance comparison *as well* as checking for spurious or missing
-        /// `-` or `--` character sequences in a flag or command.
-        advanced,
-    };
-    /// Whether to enable fix suggestions for flag and command entries.
-    enable: bool = true,
-    /// The algorithm(s) to use when suggesting fixes.
-    mode: FixMode = .advanced,
-    diff_threshold: u32,
-    /// Whether to inform the user of the correct type of a flag or
-    /// positional if they entered an incorrect one. Also suggests
-    /// using `-f--blah` or `--flag=--blah` in the case an extra flag was
-    /// found when a string was expected.
-    inform_correct_type: bool = true,
-};
-
 pub const Config = struct {
     pub const AnsiMode = enum(u2) {
         /// Don't use ANSI escape sequences, even if stdout/stderr support them.
@@ -86,20 +59,11 @@ pub const Config = struct {
     /// Whether to use ANSI escape sequences if it is detected that stdout/stderr
     /// supports them.
     ansi_mode: AnsiMode = .detect,
-    /// Fix suggestion config for flags.
-    ///
-    /// TODO implement fix suggestions
-    flag_fixes: Fixes = .{
-        .enable = true,
-        .mode = .advanced,
-        .diff_threshold = 8,
-    },
     /// The name of the program that will be shown in descriptive help strings.
     program_name: ?[]const u8 = null,
     /// A brief description of how the program should be used.
     program_description: ?[]const u8 = null,
     /// Fix suggestion config for commands.
-    command_fixes: Fixes = .{ .enable = true, .mode = .advanced, .diff_threshold = 12 },
     /// Whether to suggest adding a `--` argument in order to
     /// make a would-be flag or command be treated as a positional instead.
     suggest_add_terminator: bool = true,
