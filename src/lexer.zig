@@ -38,8 +38,6 @@ pub const Span = packed struct {
 
 pub const TokenTag = enum { long_flag, long_flag_with_value, short_flag, short_flag_with_value, command, positional, force_stop, err };
 
-// TODO ideally, flag variants should use indexes instead of the raw text representing the flag itself. That way,
-// a bunch of string comparisons wouldn't be necessary when figuring out which flag we just found.
 pub const Token = union(TokenTag) {
     long_flag: usize,
     long_flag_with_value: struct { index: usize, value_span: Span },
