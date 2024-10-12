@@ -1,24 +1,60 @@
+const root = @import("root.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 
-pub const ParseValueError = error{ IntegerOverflow, NotEnoughArguments, TooManyArguments, InvalidBool } || std.fmt.ParseIntError || std.fmt.ParseFloatError;
+const assert = std.debug.assert;
+pub const ParseValueError = error{ IntegerOverflow, NotEnoughArguments, TooManyArguments, InvalidBool, InvalidEnumField } || std.fmt.ParseIntError || std.fmt.ParseFloatError;
+
+pub const FlagType = enum { long, short };
+
+pub const OptionType = enum {
+    flag,
+    pair,
+    positional,
+};
+
+pub fn typeHasDynamicValue(comptime T: type, comptime type_for: OptionType, comptime support_allocation: bool) bool {
+    if (comptime isCounter(T) or T == root.FlagHelp)
+        return false
+    else if (comptime isBoundedMulti(T)) comptime {
+        assert(type_for == .flag);
+        return typeHasDynamicValue(@as(T, .{}).__argz_bmulti_child, type_for, support_allocation);
+    } else if (comptime isDynamicMulti(T))
+        true
+    else
+        return switch (@typeInfo(T)) {
+            .Int, .Float, .Bool, .Void => false,
+            .Array => |arr| switch (@typeInfo(arr.child)) {
+                .Int, .Float, .Bool => false,
+                .Pointer => |ptr| if (ptr.size != .Slice) internalTypeError(T) else if (type_for == .positional) T != []const u8 else support_allocation,
+                // TODO it might be useful to support [N]const u8 arrays here, so things
+                // like 'abcd,efgh,ijkl,mnop' would work.
+                else => internalTypeError(T),
+            },
+            .Pointer => |ptr| blk: {
+                if (ptr.size != .Slice)
+                    internalTypeError(T);
+                if (T == []const u8)
+                    break :blk false
+                else
+                    break :blk switch (@typeInfo(ptr.child)) {
+                        .Pointer => if (ptr.child != []const u8)
+                            internalTypeError(T)
+                        else
+                            true,
+                        else => true,
+                    };
+            },
+            else => unreachable,
+        };
+}
 
 pub fn internalTypeError(comptime T: type) noreturn {
     @compileError("`argz` internal error: unexpected type `" ++ @typeName(T) ++ "` found");
 }
 
-pub fn typeIsDynamic(comptime T: type) bool {
-    return switch (@typeInfo(T)) {
-        .Pointer => |ptr| if (ptr.size != .Slice)
-            internalTypeError(T)
-        else
-            !ptr.is_const and ptr.child != u8,
-        else => false,
-    };
-}
-
-/// Parses `string` into a float, int, or array. Slices of anything (save for strings)
-/// are not permitted.
+/// Parses `string` into a float, int, or array. All slices except `[]const u8` are
+/// not permitted.
 pub fn parseStaticValue(comptime T: type, string: []const u8) ParseValueError!T {
     return switch (@typeInfo(T)) {
         .Int => std.fmt.parseInt(T, string, 0),
@@ -54,6 +90,18 @@ pub fn parseStaticValue(comptime T: type, string: []const u8) ParseValueError!T 
                         result[i] = itm;
                     }
                 },
+                .Bool => {
+                    while (split.next()) |itm| : (i += 1) {
+                        if (i >= arr.len)
+                            return error.TooManyArguments;
+                        result[i] = if (std.mem.eql(u8, itm, "true"))
+                            true
+                        else if (std.mem.eql(u8, itm, "false"))
+                            false
+                        else
+                            return error.InvalidBool;
+                    }
+                },
                 else => internalTypeError(T),
             }
 
@@ -62,6 +110,10 @@ pub fn parseStaticValue(comptime T: type, string: []const u8) ParseValueError!T 
             else
                 result;
         },
+        .Enum => inline for (std.meta.fields(T), 0..) |field, i| {
+            if (std.mem.eql(u8, field.name, string))
+                break @as(T, @enumFromInt(i));
+        } else error.InvalidEnumField,
         .Pointer => blk: {
             if (T != []const u8)
                 internalTypeError(T);
@@ -79,155 +131,145 @@ pub fn parseStaticValue(comptime T: type, string: []const u8) ParseValueError!T 
     };
 }
 
-pub fn checkValidFlagType(comptime T: type, comptime alloc: bool) void {
-    if (isCounter(T))
-        return;
-    if (isMulti(T))
-        if (alloc)
-            return
-        else
-            @compileError("flags with type `Multi` are not supported without a memory allocator");
+pub fn parseDynamicValue(comptime T: type, allocator: std.mem.Allocator, string: []const u8) !T {
+    return blk: {
+        switch (@typeInfo(T)) {
+            .Pointer => |ptr| {
+                if (ptr.size != .Slice)
+                    internalTypeError(T);
+                switch (@typeInfo(ptr.child)) {
+                    inline .Int, .Float, .Bool => |_, tag| {
+                        var it = std.mem.splitScalar(string, ',');
+                        var buf = std.ArrayListUnmanaged(T){};
+                        errdefer buf.deinit(allocator);
 
-    switch (@typeInfo(T)) {
-        .Int, .Float, .Bool => {},
-        .Optional => |opt| {
-            if (@typeInfo(opt.child) == .Optional)
-                @compileError("`argz` does not support nested optional types");
-            checkValidFlagType(opt.child, alloc);
-        },
-        .Pointer => |ptr| {
-            if (T == []const u8)
-                return; // []const u8 is unconditionally supported as a type that can be parsed
-            if (ptr.size != .Slice)
-                @compileError("`argz` does not support parsing non-slice pointer types");
-            if (!alloc and (!ptr.is_const and ptr.child != u8)) // []const u8 implies string, []u8 implies slice of `u8`
-                @compileError("`argz` does not support parsing variable-length slices without a memory allocator");
-            switch (@typeInfo(ptr.child)) {
-                .Int, .Float => {},
-                .Pointer => |maybe_str| {
-                    if (maybe_str.size != .Slice)
-                        @compileError("`argz` does not support parsing non-slice pointer types");
-                    if (maybe_str.child == u8) {
-                        if (!maybe_str.is_const)
-                            @compileError(
-                                \\ `argz` does not support parsing slices of slices of `u8`; if you wanted to
-                                \\ parse slices of strings instead, use `[]const u8` as the slice child type.
-                            );
-                    } else @compileError("`argz` does not support parsing slices of slices of `" ++ @typeName(maybe_str.child) ++ "`");
-                },
-                else => @compileError("`argz` does not support parsing slices of `" ++ @typeName(ptr.child) ++ "`"),
+                        while (it.next()) |itm| {
+                            const val = switch (tag) {
+                                .Int => try std.fmt.parseInt(ptr.child, itm, 0),
+                                .Float => try std.fmt.parseFloat(ptr.child, itm),
+                                .Bool => if (std.mem.eql(u8, itm, "true")) true else if (std.mem.eql(u8, itm, "false")) false else return error.InvalidBool,
+                            };
+                            try buf.append(allocator, val);
+                        }
+                        break :blk buf.toOwnedSlice();
+                    },
+                    .Pointer => {
+                        comptime assert(ptr.child == []const u8);
+                        var buf = std.ArrayListUnmanaged([]const u8){};
+                        errdefer for (buf.items) |itm| {
+                            allocator.free(itm);
+                        };
+
+                        var tmp = std.ArrayListUnmanaged(u8){};
+                        errdefer tmp.deinit(allocator);
+
+                        var i = @as(usize, 0);
+                        while (i < string.len) : (i += 1) {
+                            if (string[i] == '\\')
+                                if (i + 1 < string.len and string[i + 1] == ',') {
+                                    try tmp.append(allocator, ',');
+                                    i += 1;
+                                } else try tmp.append(allocator, '\\')
+                            else if (string[i] == ',') {
+                                try buf.append(allocator, try allocator.dupe(u8, tmp.items));
+                                tmp.clearRetainingCapacity();
+                            } else try tmp.append(allocator, string[i]);
+                        }
+                        try buf.append(allocator, try tmp.toOwnedSlice(allocator));
+                        break :blk buf.toOwnedSlice(allocator);
+                    },
+                    else => internalTypeError(T),
+                }
+            },
+            .Array => |arr| {
+                comptime assert(arr.child == []const u8);
+
+                var result_idx = @as(usize, 0);
+                var result = @as([arr.len][]const u8, undefined);
+                errdefer for (result[0..result_idx]) |itm| {
+                    allocator.free(itm);
+                };
+
+                var string_idx = @as(usize, 0);
+                var tmp = std.ArrayListUnmanaged(T){};
+                errdefer tmp.deinit(allocator);
+
+                while (string_idx < string.len) : (string_idx += 1) {
+                    if (result_idx >= arr.len) return error.TooManyArguments;
+
+                    if (string[string_idx] == '\\') {
+                        if (string_idx + 1 > string.len and string[string_idx + 1] == ',') {
+                            string_idx += 1;
+                            try tmp.append(allocator, ',');
+                        } else try tmp.append(allocator, '\\');
+                    } else if (string[string_idx] == ',') {
+                        result[result_idx] = try allocator.dupe(tmp.items);
+                        tmp.clearRetainingCapacity();
+                        result_idx += 1;
+                    } else try tmp.append(allocator, string[string_idx]);
+                }
+                if (result_idx >= string.len) return error.TooManyArguments else if (result_idx + 1 != string.len) return error.NotEnoughArguments;
+                result[result_idx] = try tmp.toOwnedSlice(allocator);
+                tmp.deinit(allocator);
+
+                break :blk result;
+            },
+            else => internalTypeError(T),
+        }
+    };
+}
+
+pub fn parseSlice(comptime Child: type, allocator: std.mem.Allocator, string: []const u8) ![]Child {
+    var buf = std.ArrayListUnmanaged(Child){};
+    errdefer {
+        if (Child == []const u8) {
+            for (buf.items) |itm| {
+                allocator.free(itm);
             }
-        },
-        .Array => |arr| {
-            switch (@typeInfo(arr.child)) {
-                .Int, .Float => {},
-                .Pointer => |ptr| {
-                    if (ptr.size != .Slice)
-                        @compileError("`argz` does not support parsing non-slice pointer types");
-                    if (ptr.child == u8) {
-                        if (!ptr.is_const)
-                            @compileError(
-                                \\ `argz` does not support parsing arrays of slices of `u8`; if you wanted to
-                                \\ parse arrays of strings instead, use `[]const u8` as the array child type.
-                            );
-                    } else @compileError("`argz` does not support parsing arrays of slices of `" ++ @typeName(ptr.child) ++ "`");
-                },
-                else => @compileError("`argz` does not support parsing arrays of `" ++ @typeName(arr.child) ++ "`"),
-            }
-        },
-        else => @compileError("`argz` does not support parsing options with values of type `" ++ @typeName(T) ++ "`"),
+        }
+        buf.deinit(allocator);
     }
-}
-
-pub fn checkValidPositionalType(comptime T: type, last_arg: bool) void {
-    switch (@typeInfo(T)) {
-        .Int, .Float, .Bool => {},
-        .Optional => |opt| {
-            if (@typeInfo(opt.child) == .Optional) comptime @compileError("`argz` does not support nested optional types");
-            checkValidFlagType(opt.child);
-        },
-        .Pointer => |ptr| {
-            if (ptr.size != .Slice)
-                @compileError("`argz` does not support parsing non-slice pointer types");
-            switch (@typeInfo(ptr.child)) {
-                .Int, .Float => {},
-                .Pointer => |maybe_str| {
-                    if (maybe_str.size != .Slice)
-                        @compileError("`argz` does not support parsing non-slice pointer types");
-                    if (maybe_str.child == u8) {
-                        if (!maybe_str.is_const)
-                            @compileError(
-                                \\ `argz` does not support parsing slices of slices of `u8`; if you wanted to
-                                \\ parse slices of strings instead, use `[]const u8` as the slice child type.
-                            );
-                    } else @compileError("`argz` does not support parsing slices of slices of `" ++ @typeName(maybe_str.child) ++ "`");
-                },
-                else => @compileError("`argz` does not support parsing slices of `" ++ @typeName(ptr.child) ++ "`"),
-            }
-            if (T != []const u8 and !last_arg)
-                @compileError("`argz` does not support parsing positionals of type `" ++ @typeName(T) ++ "` that aren't the last positional in the list");
-        },
-        .Array => |arr| {
-            switch (@typeInfo(arr.child)) {
-                .Int, .Float => {},
-                .Pointer => |ptr| {
-                    if (ptr.size != .Slice)
-                        @compileError("`argz` does not support parsing non-slice pointer types");
-                    if (ptr.child == u8) {
-                        if (!ptr.is_const)
-                            @compileError(
-                                \\ `argz` does not support parsing arrays of slices of `u8`; if you wanted to
-                                \\ parse arrays of strings instead, use `[]const u8` as the array child type.
-                            );
-                    } else @compileError("`argz` does not support parsing arrays of slices of `" ++ @typeName(ptr.child) ++ "`");
-                },
-                else => @compileError("`argz` does not support parsing arrays of `" ++ @typeName(arr.child) ++ "`"),
+    switch (@typeInfo(Child)) {
+        .Int => {
+            var it = std.mem.splitScalar(u8, string, ',');
+            while (it.next()) |itm| {
+                try buf.append(allocator, try std.fmt.parseInt(Child, itm, 0));
             }
         },
-        else => @compileError("`argz` does not support parsing options with values of type `" ++ @typeName(T) ++ "`"),
+        .Float => {
+            var it = std.mem.splitScalar(u8, string, ',');
+            while (it.next()) |itm| {
+                try buf.append(allocator, try std.fmt.parseFloat(Child, itm));
+            }
+        },
+        .Pointer => if (Child == []const u8) {
+            // We have to iterate through the string ourselves because we need to handle
+            // any '\,' sequences.
+            var i = @as(usize, 0);
+            var tmp = std.ArrayListUnmanaged(u8){};
+            errdefer tmp.deinit(allocator);
+            while (i < string.len) : (i += 1) {
+                if (string[i] == '\\')
+                    if (i + 1 < string.len and string[i + 1] == ',') {
+                        try tmp.append(allocator, ',');
+                        i += 1;
+                    } else try tmp.append(allocator, '\\')
+                else if (string[i] == ',') {
+                    try buf.append(allocator, try allocator.dupe(u8, tmp.items));
+                    tmp.clearRetainingCapacity();
+                } else try tmp.append(allocator, string[i]);
+            }
+            try buf.append(allocator, try tmp.toOwnedSlice(allocator));
+        } else internalTypeError(Child),
+        .Bool => {
+            var it = std.mem.splitScalar(u8, string, ',');
+            while (it.next()) |itm| {
+                try buf.append(allocator, if (std.mem.eql(u8, itm, "true")) true else if (std.mem.eql(u8, itm, "false")) false else return error.InvalidBool);
+            }
+        },
+        else => internalTypeError(Child),
     }
-}
-
-pub fn nameForType(comptime T: type) [:0]const u8 {
-    if (comptime isCounter(T))
-        return "counter";
-    if (comptime isMulti(T))
-        return "(repeatable) " ++ comptime nameForType(getMultiChildType(T));
-
-    return switch (@typeInfo(T)) {
-        .Array => |arr| comptime nameForType(arr.child) ++ std.fmt.comptimePrint(" [{d}]", .{arr.len}),
-        .Int => |int| if (int.signedness == .signed) "int" else "uint",
-        .Float => "float",
-        .Optional => |opt| comptime nameForType(opt.child),
-        .Pointer => |ptr| if (T == []const u8) "string" else comptime nameForType(ptr.child) ++ "...",
-        .Bool => "bool",
-        else => internalTypeError(T),
-    };
-}
-
-pub fn nameForTypeAdvanced(comptime T: type) [:0]const u8 {
-    if (isCounter(T))
-        return "counter";
-    if (isMulti(T))
-        return "repeatable";
-
-    return switch (@typeInfo(T)) {
-        .Array => |arr| comptime nameForTypeAdvanced(arr.child) ++ std.fmt.comptimePrint(" [{d}]", .{arr.len}),
-        .Int, .Float => @typeName(T),
-        .Optional => |opt| @typeName(opt),
-        .Pointer => |ptr| @typeName(ptr.child) ++ "...",
-        .Bool => "bool",
-        else => comptime internalTypeError(T),
-    };
-}
-
-/// TODO use this for other nameForType functions.
-pub fn suffixForType(comptime T: type) [:0]const u8 {
-    return switch (@typeInfo(T)) {
-        .Array => |arr| std.fmt.comptimePrint(" [{d}]", .{arr.len}),
-        .Pointer => if (T == []const u8) "" else "...",
-        else => "",
-    };
+    return buf.toOwnedSlice(allocator);
 }
 
 pub fn runtimeCheck(check: bool, comptime fmt: []const u8, args: anytype) void {
@@ -256,20 +298,10 @@ pub fn hammingDist(a: []const u8, b: []const u8) usize {
     return result;
 }
 
-pub fn isToggle(comptime T: type) bool {
-    return @typeInfo(T) == .Struct and @hasField(T, "__argz_toggle_tag") and @hasField(T, "__argz_counter_type") and @TypeOf(T.__argz_counter_value) == bool;
-}
-
-pub fn getToggleValue(comptime T: type) bool {
-    if (!isToggle(T))
-        internalTypeError(T);
-    return @as(*const bool, @ptrCast(@alignCast(std.meta.fieldInfo(T, .__argz_toggle_value).default_value))).*;
-}
-
 pub fn isCounter(comptime T: type) bool {
     if (@typeInfo(T) == .Struct) {
-        return if (@hasField(T, "__argz_counter_tag") and @hasField(T, "__argz_counter_type"))
-            switch (@typeInfo(@as(*const type, @ptrCast(@alignCast(std.meta.fieldInfo(T, .__argz_counter_type).default_value))).*)) {
+        return if (@hasField(T, "__argz_counter_type"))
+            switch (@typeInfo(T.__argz_counter_type)) {
                 .Int => |int| int.bits != 0,
                 else => false,
             }
@@ -278,31 +310,38 @@ pub fn isCounter(comptime T: type) bool {
     } else return false;
 }
 
-pub fn isMulti(comptime T: type) bool {
-    return @typeInfo(T) == .Struct and @hasField(T, "__argz_multi_tag") and @hasField(T, "__argz_multi_type") and @hasField(T, "__argz_multi_child_type") and @hasField(T, "__argz_multi_stack_len");
+pub fn isBoundedMulti(comptime T: type) bool {
+    return @typeInfo(T) == .Struct and @hasField(T, "__argz_bmulti_child") and @TypeOf(@as(T, .{}).__argz_bmulti_child) == type and @hasField(T, "__argz_bmulti_len") and @hasField(T, "__argz_bmulti_backing_type");
 }
 
-pub fn getCounterType(comptime T: type) type {
-    if (!isCounter(T))
-        internalTypeError(T);
-    return @as(*const type, @ptrCast(@alignCast(std.meta.fieldInfo(T, .__argz_counter_type).default_value))).*;
+pub fn isDynamicMulti(comptime T: type) bool {
+    if (!(@typeInfo(T) == .Struct and @hasField(T, "__argz_dmulti_child") and @hasField(T, "__argz_dmulti_backing_type"))) {
+        return false;
+    } else {
+        const Child = @as(T, .{}).__argz_dmulti_child;
+        return @TypeOf(Child) == type;
+    }
 }
 
-pub fn getMultiType(comptime T: type) type {
-    if (!isMulti(T))
-        internalTypeError(T);
-    return @as(*const type, @ptrCast(@alignCast(std.meta.fieldInfo(T, .__argz_multi_type).default_value))).*;
+pub fn isPair(comptime T: type) bool {
+    return @typeInfo(T) == .Struct and @hasDecl(T, "__argz_pair_tag") and @hasDecl(T, "Result");
 }
 
-pub fn getMultiChildType(comptime T: type) type {
-    if (!isMulti(T))
-        internalTypeError(T);
-    return @as(*const type, @ptrCast(@alignCast(std.meta.fieldInfo(T, .__argz_multi_child_type).default_value))).*;
+test parseStaticValue {
+    inline for (.{ .{ u32, "12345", 12345 }, .{ f32, "123.45", 123.45 }, .{ [4]u32, "123,456,789,10", [4]u32{ 123, 456, 789, 10 } }, .{ [2][]const u8, "this shouldn't\\, be escaped", [2][]const u8{ "this shouldn't\\", " be escaped" } }, .{ []const u8, "this is a string", "this is a string" }, .{ enum { a, cool, @"enum" }, "cool", .cool } }) |data| {
+        const val = try parseStaticValue(data[0], data[1]);
+        try std.testing.expectEqualDeep(val, data[2]);
+    }
 }
 
-pub fn getMultiStackLen(comptime T: type) ?usize {
-    if (!isMulti(T))
-        internalTypeError(T);
-
-    return @as(*const ?usize, @ptrCast(@alignCast(std.meta.fieldInfo(T, .__argz_multi_stack_len).default_value))).*;
+test parseSlice {
+    const allocator = std.testing.allocator;
+    inline for (.{ .{ u32, "1,2,3,4", &[4]u32{ 1, 2, 3, 4 } }, .{ f32, "1.2,3.4,5.6,7.8", &[4]f32{ 1.2, 3.4, 5.6, 7.8 } }, .{ []const u8, "this should\\, be escaped, but this should not", &[2][]const u8{ "this should, be escaped", " but this should not" } } }) |data| {
+        const val = try parseSlice(data[0], allocator, data[1]);
+        defer allocator.free(val);
+        defer if (data[0] == []const u8) for (val) |itm| {
+            allocator.free(itm);
+        };
+        try std.testing.expectEqualDeep(val, data[2]);
+    }
 }

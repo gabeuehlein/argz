@@ -1,36 +1,18 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const testing = std.testing;
 const util = @import("util.zig");
+pub const Lexer = @import("Lexer.zig");
+const args = @import("args.zig");
+const testing = std.testing;
 
-const tokenizer = @import("Tokenizer.zig");
+pub const Args = args.Args;
+pub const OwnedArgs = args.OwnedArgs;
+pub const SystemArgs = args.SystemArgs;
 
-pub const Args = tokenizer.Args;
-pub const SystemArgs = if (builtin.link_libc or !(builtin.os.tag == .windows or builtin.os.tag == .wasi))
-    tokenizer.SystemArgs
-else switch (builtin.os.tag) {
-    .windows => @compileError("non-libc Windows platforms don't support `SystemArgs`, as `std.os.argv` isn't supported; use `OwnedArgs` instead"),
-    .wasi => @compileError("non-libc WASI platforms don't support `SystemArgs`, as `std.os.argv` isn't supported; use `OwnedArgs` instead"),
-    else => unreachable,
-};
-pub const OwnedArgs = tokenizer.OwnedArgs;
-pub const Tokenizer = tokenizer.Tokenizer;
+/// Dummy type indicating that a flag should serve to print a message showing usage information.
+pub const FlagHelp = @TypeOf(.{ .__argz_flaghelp_tag = {} });
 
-pub const Help = struct {
-    /// Whether to automatically create a short flag (`-h`) that prints a
-    /// help string describing the program and exits gracefully.
-    short: bool = true,
-    /// Whether to automatically create a long flag (`--help`) that prints
-    /// a help string describing the program and exits gracefully.
-    long: bool = true,
-    /// Whether to automatically create a command (`help`) that prints
-    /// a help string describing the program and exits gracefully.
-    command: bool = false,
-    /// An description of the program or (sub)command's function or usage.
-    info: ?[]const u8 = null,
-};
-
-pub const Parser = @import("Parser.zig").argParser;
+pub const argParser = @import("Parser.zig").argParser;
 pub const HelpPrinter = @import("help.zig").HelpPrinter;
 
 pub const Mode = union(enum(u1)) {
@@ -55,7 +37,6 @@ pub const Config = struct {
         /// to check for ANSI escape sequence support, prefer `disable` instead.
         force,
     };
-    help: Help = .{},
     /// Whether to use ANSI escape sequences if it is detected that stdout/stderr
     /// supports them.
     ansi_mode: AnsiMode = .detect,
@@ -66,8 +47,6 @@ pub const Config = struct {
     /// Whether to suggest adding a `--` argument in order to
     /// make a would-be flag or command be treated as a positional instead.
     suggest_add_terminator: bool = true,
-    /// Whether to force UTF-8 encoded inputs for command-line arguments.
-    force_utf8: bool = true,
     /// Top-level flags for the CLI. These will be ignored after any commands
     /// if they have a flag with the same identifier.
     top_level_flags: []const Flag = &.{},
@@ -75,133 +54,224 @@ pub const Config = struct {
     /// is command-based or flag-based.
     mode: Mode,
     /// Whether to support dynamic memory allocation. If `true`, variable length slices become
-    /// legal as option types and any `[]const u8` values will be cloned via the provided allocator.
-    /// It is the programmer's responsibility to free them when no longer needed.
+    /// legal as option types. It is the programmer's responsibility to free them when no longer needed.
+    ///
+    /// In the case of a flag of positional being of type `[]const u8`, no allocation will be performed;
+    /// the argument will be returned as-is from the arguments provided by the user. If the type is an array or slice
+    /// *and* the type is for a flag, then strings will be cloned by the allocator, with commas being able to
+    /// be escaped using a backslash (e.g. the string "1\,2,3" will produce the array `.{ "1,2", "3" }`). These strings
+    /// *will* have to be freed by the programmer.
+    ///
+    /// Arrays or slices of positionals are not handled as above -- as positionals are unique to different arguments,
+    /// there is no possible ambiguities between separate arguments, and as such the argument provided by the user
+    /// will be used as-is in the respective slice. Note that *the slice containing the strings* is still dynamically
+    /// allocated, and must be freed by the user, only the strings contained within are not.
     support_allocation: bool,
 };
 
 pub const Command = struct {
-    /// The textual representation of the command. May *not* contain
-    /// an ASCII space character (` `, hex `0x20`) or ASCII equals character
-    /// (`=`, hex `0x3d`)
+    /// The textual representation of the command.
     cmd: [:0]const u8,
     field_name: ?[:0]const u8 = null,
-    /// A brief help message describing the command's usage. Use `help.info` to provide
+    /// A brief help message describing the command's usage. Use `info` to provide
     /// a more in-depth help message.
     help_msg: ?[]const u8 = null,
-    /// Custom flags for the command. Be aware that these will take precedence over any prior
-    /// flags with the same long/short identifiers when being parsed.
+    /// Custom flags for the command. Any prior flags will *not* additionally be parsed.
     flags: []const Flag = &.{},
     /// The parsing [Mode](argz.Mode) for this command. `.standard` should be used for bottom-level
     /// commands, i.e. those which should perform a particular action. `.commands` should be used to
     /// to group clusters of related actions.
     mode: Mode,
-    /// Additional help information for the command.
-    help: Help = .{
-        .long = false,
-        .short = false,
-        .command = true,
-    },
+    /// Whether to designate this flag as a help command. Note that multiple such help commands can
+    /// exist in one set of commands, and it is not checked that there is at most one help command.
+    is_help: bool = false,
+    /// A detailed string documenting the command's usage.
+    info: ?[]const u8 = null,
+
+    pub fn fieldName(cmd: Command) [:0]const u8 {
+        return cmd.field_name orelse cmd.cmd;
+    }
 };
+
+/// TODO verify First and Second to make sure they are valid.
+pub fn Pair(comptime First: type, comptime Second: type, comptime separator: u21) type {
+    return struct {
+        const __argz_pair_tag = {};
+
+        const Result = struct { First, Second };
+
+        pub fn hasDynamicValue(comptime support_allocation: bool) bool {
+            return util.typeHasDynamicValue(First, .pair, support_allocation) or util.typeHasDynamicValue(Second, .pair, support_allocation);
+        }
+
+        pub fn tryParse(string: []const u8) !Result {
+            var buf = @as([4]u8, undefined);
+            const bytes = std.fmt.bufPrint(&buf, "{u}", .{separator}) catch unreachable;
+            var it = (try std.unicode.Utf8View.init(string)).iterator();
+            const first, const second, const sep_found = while (it.nextCodepointSlice()) |data| {
+                if (std.mem.eql(u8, bytes, data))
+                    break .{ string[0 .. it.i - bytes.len], string[it.i..], true };
+            } else if (@typeInfo(Second) == .Optional) .{ string, undefined, false } else return error.SeparatorNotFound;
+            const first_val = try util.parseStaticValue(First, first);
+            const second_val = switch (@typeInfo(Second)) {
+                .Optional => |opt| if (!sep_found) null else try util.parseStaticValue(opt.child, second),
+                else => try util.parseStaticValue(Second, second),
+            };
+            return .{ first_val, second_val };
+        }
+
+        pub fn tryParseAlloc(allocator: std.mem.Allocator, string: []const u8) !Result {
+            var buf = @as([4]u8, undefined);
+            const bytes = std.fmt.bufPrint(&buf, "{u}", .{separator}) catch unreachable;
+            var it = (try std.unicode.Utf8View.init(string)).iterator();
+            const first, const second, const sep_found = while (it.nextCodepointSlice()) |data| {
+                if (std.mem.eql(u8, bytes, data))
+                    break .{ string[0 .. it.i - bytes.len], string[it.i..], true };
+            } else if (@typeInfo(Second) == .Optional) .{ string, undefined, false } else return error.SeparatorNotFound;
+            const first_val = try util.parseStaticValue(First, first);
+            const second_val = if (@typeInfo(Second) == .Optional and !sep_found)
+                null
+            else if (comptime util.typeHasDynamicValue(Second, .pair, true))
+                try util.parseSlice(@typeInfo(Second).Pointer.child, allocator, second)
+            else
+                try util.parseStaticValue(Second, second);
+            return .{ first_val, second_val };
+        }
+    };
+}
+
+test "Pair.tryParse" {
+    inline for (.{ .{ Pair(u32, []const u8, '='), "92=bar", .{ 92, "bar" } }, .{ Pair(bool, [4]f32, '='), "true=1.2,3.4,5.6,7.8", .{ true, [4]f32{ 1.2, 3.4, 5.6, 7.8 } } }, .{ Pair([5]bool, bool, '='), "true,true,false,true,false=true", .{ [5]bool{ true, true, false, true, false }, true } }, .{ Pair([]const u8, []const u8, '='), "string=other-string", .{ "string", "other-string" } }, .{ Pair([2][]const u8, u32, '='), "a,string=1", .{ [2][]const u8{ "a", "string" }, 1 } }, .{ Pair(u0, u0, '='), "0=0", .{ 0, 0 } }, .{ Pair([]const u8, ?u16, '='), "foobar", .{ "foobar", null } } }) |data| {
+        const val = try data[0].tryParse(data[1]);
+        try std.testing.expectEqualDeep(val, data[2]);
+    }
+
+    const pair = Pair(enum { @"emit-bin", @"enable-asserts", @"link-mode", @"use-mold" }, []u32, '🄯');
+    const string = "use-mold🄯1,2,3,4,5";
+    const val = try pair.tryParseAlloc(std.testing.allocator, string);
+    defer std.testing.allocator.free(val[1]);
+    try std.testing.expectEqualDeep(val, .{ .@"use-mold", &[5]u32{ 1, 2, 3, 4, 5 } });
+}
 
 pub const Flag = struct {
     /// The short form of the flag. If equal to `null`, `long` must have a valid representation.
     short: ?u21 = null,
     /// The long form of the flag. If equal to `null`, `short` must have a valid representation.
-    long: ?[]const u8 = null,
+    long: ?[:0]const u8 = null,
     /// A brief description of the flag's purpose and usage.
     help_msg: ?[]const u8 = null,
-    /// The name of the field representing the flag in the resulting flag `struct`.
-    field_name: [:0]const u8,
-    /// The type of the flag. Must *not* be equal to `void`.
-    type: type = void,
-    /// A default value for the flag. A value of `null` indicates that a value *must* be supplied
+    /// The name of the field representing the flag in the resulting flag `struct`. If `null`, will
+    /// be equivalent to either `long` or `short` represented as a UTF-8 encoded string.
+    field_name: ?[:0]const u8 = null,
+    /// The type of the flag. If equal to `void`, then the corresponding `struct` field will be a
+    /// boolean indicating whether this flag was found in the argument list.
+    type: type,
+    /// A default value for the flag. A value of `null` indicates that this flag *must* be supplied
     /// by the user. Otherwise, the data pointed to must have a type equal to the `type` provided.
-    ///
-    /// The exception to this rule is when `type == bool`. In this case, then the user doesn't have
-    /// to specify a particular value; it will be set to the *opposite* of whatever the default value is.
-    /// If no default value was provided, an occurrence will set the value to `true`.
     default_value: ?*const anyopaque = null,
-    alt_type_name: ?[]const u8 = null,
+    /// An alternative type name to display in place of a flag's type. For example, one might specify
+    /// this to be `"PATH"` if a string argument should represent a filesystem path. By convention,
+    /// this should be in all caps, with spaces being used to separate words, meaning that a string
+    /// like `"FRIED CHICKEN"` should be preferred over `"fried chicken"` or `"FRIED_CHICKEN"`.
+    alt_type_name: ?[:0]const u8 = null,
+
+    pub fn fieldName(flag: Flag) [:0]const u8 {
+        return flag.field_name orelse (flag.long orelse std.fmt.comptimePrint("{u}", .{flag.short.?}));
+    }
+
+    pub fn hasDynamicValue(comptime flag: Flag, comptime support_allocation: bool) bool {
+        return if (comptime util.isDynamicMulti(flag.type))
+            true
+        else switch (comptime @typeInfo(flag.type)) {
+            .Pointer => |ptr| ptr.size == .Slice and flag.type != []const u8,
+            .Array => |arr| support_allocation and arr.child == []const u8,
+            else => false,
+        };
+    }
+
+    /// Returns a type string representing the flag's type. Will *not* append suffixes
+    /// to an alternate type name if found, and will cause a compile error if `flag.type` is
+    /// equal to `void`.
+    pub fn typeString(comptime flag: Flag, comptime ignore_alternate: bool) [:0]const u8 {
+        return if (!ignore_alternate and flag.alt_type_name != null) flag.alt_type_name.? else blk: {
+            const Inner = switch (@typeInfo(flag.type)) {
+                .Optional => |opt| opt.child,
+                else => flag.type,
+            };
+            break :blk switch (@typeInfo(Inner)) {
+                .Void => @compileError("Flag.typeString requires a non-void type"),
+                .Int => "INTEGER",
+                .Float => "FLOAT",
+                .Bool => "BOOLEAN",
+                .Pointer => if (Inner == []const u8) "STRING" else switch (@typeInfo(Inner)) {
+                    .Int => "INTEGER",
+                    .Float => "FLOAT",
+                    .Bool => "BOOLEAN",
+                    else => @compileError("invalid type for flag: '" ++ @typeName(flag.type) ++ "'"),
+                } ++ "...",
+                .Array => |arr| switch (arr.child) {
+                    .Int => "INTEGER",
+                    .Float => "FLOAT",
+                    .Bool => "BOOLEAN",
+                    .Pointer => if (arr.child == []const u8) "STRING" else @compileError("invalid type for flag"),
+                } ++ std.fmt.comptimePrint("[{d}]", .{arr.len}),
+                else => @compileError("invalid type for flag: '" ++ @typeName(type.flag) ++ "'"),
+            };
+        };
+    }
+
+    pub fn flagString(comptime flag: Flag, variant: util.FlagType) [:0]const u8 {
+        return switch (variant) {
+            .long => "--" ++ (flag.long orelse unreachable),
+            .short => std.fmt.comptimePrint("-{u}", .{flag.short orelse unreachable}),
+        };
+    }
 };
 
 pub const Positional = struct {
-    /// The string that will be displayed in parentheses or braces in the CLI's help message.
-    display: []const u8,
-    /// The string that will identify the positional's field in the resulting struct.
-    field_name: [:0]const u8,
+    /// The string that will be displayed in parentheses or braces in the CLI's help message. This should
+    /// be brief yet descriptive, such as `"PATH"` or `"ITERATIONS"`.
+    display: [:0]const u8,
+    /// The string that will identify the positional's field in the resulting struct. If equal to `null`,
+    /// [fieldName] will return `display` instead.
+    field_name: ?[:0]const u8,
     /// The positional's type. Can *not* be `void`. May be an optional value if and only if all successive positionals are optional.
-    /// A `Multi` is permitted as this type.
     type: type,
-    /// An alternative type name to display in the positional list. This can be used to provide more context for what a positional
-    /// represents, e.g. `"path"` instead of simply `"string"`.
-    alt_type_name: ?[]const u8 = null,
     /// A help string describing the positional argument's use.
     help_msg: ?[]const u8 = null,
+
+    pub fn fieldName(comptime pos: Positional) [:0]const u8 {
+        return pos.field_name orelse pos.display;
+    }
+
+    pub fn displayString(comptime pos: Positional) [:0]const u8 {
+        comptime return pos.display ++ pos.suffix();
+    }
+
+    pub fn suffix(pos: Positional) [:0]const u8 {
+        return switch (@typeInfo(pos.type)) {
+            .Array => |arr| std.fmt.comptimePrint("[{d}]", .{arr.len}),
+            .Pointer => if (pos.type == []const u8) "" else "...",
+        };
+    }
 };
 
-/// Returns a dummy type representing a flag whose occurances should be counted.
-/// `T` *must* be an integer type. It c;an be either signed or unsigned, but must not be zero-sized
-/// (i.e. `i0` or `u0` values are not allowed). Integer overflow is handled via saturating arithmetic.
 pub fn Counter(comptime T: type) type {
-    if (@typeInfo(T) != .Int)
-        @compileError("`Counter` only supports integers; `" ++ @typeName(T) ++ "` is not supported");
-
-    if (@bitSizeOf(T) == 0)
-        @compileError("`Counter` doesn't support the `i0` or `u0` types");
-
-    return struct { __argz_counter_tag: void = {}, __argz_counter_type: type = T };
+    return switch (@typeInfo(T)) {
+        .Int => |int| if (int.bits == 0)
+            @compileError("counter's backing int may not be `u0` or `i0`")
+        else
+            .{ .__argz_counter_type = T },
+        else => @compileError("counter's backing type must be an integer; `" ++ @typeName(T) ++ "` is not supported"),
+    };
 }
 
-/// Returns a dummy type representing a flag that can occur multiple times in the argument list.
-/// If `size != null and size.? != 0`, then space on the stack is allocated (via [std.BoundedArray]) to store `size.?` values
-/// before switching to a heap-based implementation (via [std.ArrayListUnmanaged]).
-pub fn Multi(comptime T: type, comptime size: ?usize) type {
-    if (size == 0)
-        @compileError("zero-length stack-based Multi is not supported; use `null` to force heap allocation");
-
-    // TODO the type checking *needs* to be improved. For example, optionals are allowed here, when
-    // they shouldn't. This goes for the entire codebase.
-    util.checkValidFlagType(T, true);
-
-    return struct { __argz_multi_tag: void = {}, __argz_multi_type: type = MultiValue(T, size), __argz_multi_stack_len: ?usize = size, __argz_multi_child_type: type = T };
+pub fn BoundedMulti(comptime T: type, comptime max_elems: usize) type {
+    if (max_elems == 0)
+        @compileError("cannot have a `BoundedMulti` with 0 max elements");
+    return @TypeOf(.{ .__argz_bmulti_child = T, .__argz_bmulti_len = max_elems, .__argz_bmulti_backing_type = std.BoundedArray(T, max_elems) });
 }
 
-pub fn MultiValue(comptime T: type, comptime size: ?usize) type {
-    return if (size) |max| union(enum(u1)) {
-        stack: std.BoundedArray(T, max),
-        heap: std.ArrayListUnmanaged(T),
-
-        pub fn appendNoAlloc(self: *@This(), value: T) error{ Overflow, OnHeap }!void {
-            switch (self.*) {
-                .stack => |*val| {
-                    try val.append(value);
-                },
-                .heap => return error.OnHeap,
-            }
-        }
-
-        pub fn append(self: *@This(), allocator: std.mem.Allocator, value: T) error{OutOfMemory}!void {
-            switch (self.*) {
-                .stack => |*val| {
-                    val.append(value) catch {
-                        var alu = try std.ArrayListUnmanaged(T).initCapacity(allocator, max + 1);
-                        alu.appendSliceAssumeCapacity(val.constSlice());
-                        alu.appendAssumeCapacity(value);
-                        self.heap = alu;
-                    };
-                },
-                .heap => |*val| {
-                    try val.append(allocator, value);
-                },
-            }
-        }
-
-        pub fn deinitAlloc(self: *@This(), allocator: std.mem.Allocator) void {
-            switch (self.*) {
-                .stack => {},
-                .heap => |*val| val.deinit(allocator),
-            }
-        }
-    } else std.ArrayListUnmanaged(T);
+pub fn DynamicMulti(comptime T: type) type {
+    return @TypeOf(.{ .__argz_dmulti_child = T, .__argz_dmulti_backing_type = std.ArrayListUnmanaged(T) });
 }

@@ -44,42 +44,36 @@ const TextModifier = enum {
     }
 };
 
-fn TextFormatter(comptime Ty: type, comptime fmt: []const u8, comptime mod: TextModifier, comptime enable: bool) type {
+pub fn AnsiFormatter(comptime T: type, comptime fmt: []const u8, comptime color: ?TerminalColor, comptime text_mod: ?TextModifier) type {
     return struct {
-        inner: Ty,
+        inner: T,
+        enable: bool,
 
-        pub fn format(self: @This(), comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-            if (enable) {
-                try writer.print("\x1b[{d}m", .{mod.getAnsiSetCode()});
+        pub fn format(f: @This(), comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) @TypeOf(writer).Error!void {
+            if (f.enable) {
+                if (color) |col| {
+                    try writer.print("\x1b[38;5;{d}m", .{col.getForegroundCode()});
+                }
+                if (text_mod) |mod| {
+                    try writer.print("\x1b[{d}m", .{mod.getAnsiSetCode()});
+                }
             }
-            try writer.print(fmt, self.inner);
-            if (enable) {
-                try writer.print("\x1b[{d}m", .{mod.getAnsiClearCode()});
+            try writer.print(fmt, f.inner);
+            if (f.enable) {
+                if (text_mod) |mod| {
+                    try writer.print("\x1b[{d}m", .{mod.getAnsiClearCode()});
+                }
+                if (color != null) {
+                    try writer.writeAll("\x1b[39;5;0m");
+                }
             }
         }
     };
 }
 
-pub fn T(inner: anytype, comptime fmt: []const u8, comptime mod: TextModifier, comptime enable: bool) TextFormatter(@TypeOf(inner), fmt, mod, enable) {
-    return .{ .inner = inner };
-}
-
-fn ColorFormatter(comptime Ty: type, comptime fmt: []const u8, comptime color: TerminalColor, comptime enable: bool) type {
-    return struct {
-        inner: Ty,
-
-        pub fn format(self: @This(), comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-            if (enable) {
-                try writer.print("\x1b[38;5;{d}m", .{color.getForegroundCode()});
-            }
-            try writer.print(fmt, self.inner);
-            if (enable) {
-                try writer.writeAll("\x1b[39;5;0m");
-            }
-        }
-    };
-}
-
-pub fn C(inner: anytype, comptime fmt: []const u8, comptime color: TerminalColor, comptime enable: bool) ColorFormatter(@TypeOf(inner), fmt, color, enable) {
-    return .{ .inner = inner };
+test AnsiFormatter {
+    const q = AnsiFormatter(u32, "{x}", .red, .bold){ .enable = true, .inner = 65535 };
+    var buf = @as([128]u8, undefined);
+    const b = std.fmt.bufPrint(&buf, "{}", .{q}) catch unreachable;
+    try std.testing.expectEqualStrings("\x1b[38;5;1m\x1b[1mffff\x1b[22m\x1b[39;5;0m", b);
 }

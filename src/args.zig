@@ -1,6 +1,6 @@
 const builtin = @import("builtin");
 const util = @import("util.zig");
-const Span = @import("lexer.zig").Span;
+const Span = @import("Lexer.zig").Span;
 
 pub const Args = struct {
     v_argv_get: *const fn (*const anyopaque, usize) []const u8,

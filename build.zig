@@ -35,6 +35,9 @@ pub fn build(b: *std.Build) void {
         };
         exe.root_module.addImport("argz", mod);
         const artifact = b.addRunArtifact(exe);
+        if (b.args) |args| {
+            artifact.addArgs(args);
+        }
         run_example.dependOn(&artifact.step);
     }
 
