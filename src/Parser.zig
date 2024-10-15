@@ -49,6 +49,29 @@ fn checkValidFlags(comptime flags: []const Flag, comptime support_allocation: bo
                     .Int, .Float, .Bool, .Array, .Pointer => break :check,
                     else => @compileError("invalid type for flag: '" ++ @typeName(flag.type) ++ "'"),
                 }
+            } else {
+                var optional = false;
+                var array_or_slice = false;
+                flag_check: switch (@typeInfo(flag.type)) {
+                    .Void, .Int, .Float, .Bool => {},
+                    .Optional => |opt| if (optional)
+                        @compileError("argz does not support parsing nested optionals")
+                    else {
+                        optional = true;
+                        continue :flag_check opt.child;
+                    },
+                    .pointer => |ptr| if (ptr.size != .Slice)
+                        @compileError("argz does not support parsing flags of type '" ++ @typeName(@Type(.{ .pointer = ptr })) ++ "'")
+                    else if (ptr.child == []const u8)
+                        break :flag_check
+                    else if (array_or_slice)
+                        @compileError("argz does not support parsing slices of '" ++ @typeName(@Type(.{ .pointer = ptr })) ++ "'")
+                    else {
+                        array_or_slice = true;
+                        optional = false;
+                        continue :flag_check ptr.child;
+                    },
+                }
             }
             const slice_or_array, const optional, const Child = switch (@typeInfo(flag.type)) {
                 .Void => break :check,
@@ -92,30 +115,6 @@ fn checkValidFlags(comptime flags: []const Flag, comptime support_allocation: bo
 }
 
 fn checkValidMode(comptime mode: Mode, comptime cfg: Config) void {
-    // TODO when we update to Zig 0.14, we can inline this and use
-    // a labeled switch-continue block instead of recursion
-    const checkType = struct {
-        fn func(comptime T: type, comptime i: usize, comptime len: usize, comptime found_optional: bool) void {
-            const ti = @typeInfo(T);
-            if (ti != .Optional and found_optional) @compileError("only optional positionals may follow an optional positional");
-            switch (@typeInfo(T)) {
-                .Void => @compileError("positional type cannot be void"),
-                .Int, .Float, .Bool, .Array => {},
-                .Pointer => |ptr| if (i + 1 != len)
-                    @compileError("variadic positionals must be at the end of the positional list")
-                else switch (@typeInfo(ptr.child)) {
-                    .Int, .Float, .Bool => {},
-                    else => if (ptr.child != []const u8) @compileError("invalid positional type '" ++ @typeName(T) ++ "'"),
-                },
-                .Optional => |opt| if (@typeInfo(opt.child) == .Optional)
-                    @compileError("positional type cannot be a nested optional")
-                else
-                    func(opt.child, i, len, true),
-                else => @compileError("invalid type '" ++ @typeName(T) ++ "'"),
-            }
-        }
-    }.func;
-
     comptime switch (mode) {
         .commands => |cmds| {
             for (cmds) |cmd| {
@@ -125,9 +124,33 @@ fn checkValidMode(comptime mode: Mode, comptime cfg: Config) void {
             }
         },
         .standard => |positionals| {
+            var optional = false;
+            var array_or_slice = false;
             for (0.., positionals) |i, positional| {
                 if (positional.display.len == 0) @compileError("positional display text cannot be empty");
-                checkType(positional.type, i, positionals.len, false);
+                check: switch (@typeInfo(positional.type)) {
+                    .Void => @compileError("positional type cannot be void"),
+                    .Int, .Float, .Bool, .Array => {},
+                    .pointer => |ptr| if (ptr.size != .Slice)
+                        @compileError("argz does not support parsing positionals of type '" ++ @typeName(@Type(.{ .pointer = ptr })) ++ "'")
+                    else if (i + 1 != positionals.len)
+                        @compileError("variadic positionals must be at the end of the positional list")
+                    else if (ptr.child == []const u8)
+                        break :check
+                    else if (array_or_slice)
+                        @compileError("argz does not support parsing slices of type '" ++ @typeName(@Type(.{ .pointer = ptr })) ++ "'")
+                    else {
+                        array_or_slice = true;
+                        optional = false; // ?[]?T is allowed
+                        continue :check ptr.child;
+                    },
+                    .Optional => |opt| if (optional)
+                        @compileError("argz does not support parsing nested optional values")
+                    else {
+                        optional = true;
+                        continue :check opt.child;
+                    },
+                }
             }
         },
     };
