@@ -60,7 +60,7 @@ pub const SystemArgsImpl = struct {
         const arg = me.argv[index];
         const len: usize = blk: {
             if (builtin.link_libc) {
-                // libc strlen is typically optimized better than a scalar loop,
+                // libc strlen is typically optimized better than a scalar loop
                 // for common argument lengths, so use that if we're linking against libc
                 const strlen = @cImport(@cInclude("string.h")).strlen;
                 break :blk strlen(arg);

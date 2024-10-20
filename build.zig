@@ -1,8 +1,5 @@
 const std = @import("std");
 
-// Although this function looks imperative, note that its job is to
-// declaratively construct a build graph that will be executed by an external
-// runner.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
 
@@ -10,7 +7,7 @@ pub fn build(b: *std.Build) void {
 
     const lib = b.addStaticLibrary(.{
         .name = "argz",
-        .root_source_file = b.path("src/root.zig"),
+        .root_source_file = b.path("src/argz.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -26,7 +23,7 @@ pub fn build(b: *std.Build) void {
 
     const run_example = b.step("run-example", "run an example");
     if (example) |example_str| {
-        const mod = b.addModule("argz", .{ .root_source_file = b.path("src/root.zig"), .target = target, .optimize = optimize });
+        const mod = b.addModule("argz", .{ .root_source_file = b.path("src/argz.zig"), .target = target, .optimize = optimize });
         const e = std.meta.stringToEnum(Example, example_str) orelse @panic("invalid example provided");
         const exe = switch (e) {
             .echo => b.addExecutable(.{ .name = "echo-demo", .root_source_file = b.path("examples/echo.zig"), .target = target, .optimize = optimize }),
@@ -42,14 +39,4 @@ pub fn build(b: *std.Build) void {
     }
 
     b.getInstallStep().dependOn(&install_docs.step);
-
-    const check_lib = b.addStaticLibrary(.{
-        .name = "argz",
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const check_step = b.step("check", "perform a more in-depth check");
-    check_step.dependOn(&check_lib.step);
 }

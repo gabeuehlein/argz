@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const util = @import("util.zig");
 pub const Lexer = @import("Lexer.zig");
 const args = @import("args.zig");
+
 const testing = std.testing;
 
 pub const Args = args.Args;
@@ -76,7 +77,7 @@ pub const Command = struct {
     /// A brief help message describing the command's usage. Use `info` to provide
     /// a more in-depth help message.
     help_msg: ?[]const u8 = null,
-    /// Custom flags for the command. Any prior flags will *not* additionally be parsed.
+    /// Custom flags for the command. Any prior flags will *not* be parsed.
     flags: []const Flag = &.{},
     /// The parsing [Mode](argz.Mode) for this command. `.standard` should be used for bottom-level
     /// commands, i.e. those which should perform a particular action. `.commands` should be used to
@@ -93,64 +94,12 @@ pub const Command = struct {
     }
 };
 
-/// TODO verify First and Second to make sure they are valid.
 pub fn Pair(comptime First: type, comptime Second: type, comptime separator: u21) type {
-    return struct {
-        const __argz_pair_tag = {};
-
-        const Result = struct { First, Second };
-
-        pub fn hasDynamicValue(comptime support_allocation: bool) bool {
-            return util.typeHasDynamicValue(First, .pair, support_allocation) or util.typeHasDynamicValue(Second, .pair, support_allocation);
-        }
-
-        pub fn tryParse(string: []const u8) !Result {
-            var buf = @as([4]u8, undefined);
-            const bytes = std.fmt.bufPrint(&buf, "{u}", .{separator}) catch unreachable;
-            var it = (try std.unicode.Utf8View.init(string)).iterator();
-            const first, const second, const sep_found = while (it.nextCodepointSlice()) |data| {
-                if (std.mem.eql(u8, bytes, data))
-                    break .{ string[0 .. it.i - bytes.len], string[it.i..], true };
-            } else if (@typeInfo(Second) == .Optional) .{ string, undefined, false } else return error.SeparatorNotFound;
-            const first_val = try util.parseStaticValue(First, first);
-            const second_val = switch (@typeInfo(Second)) {
-                .Optional => |opt| if (!sep_found) null else try util.parseStaticValue(opt.child, second),
-                else => try util.parseStaticValue(Second, second),
-            };
-            return .{ first_val, second_val };
-        }
-
-        pub fn tryParseAlloc(allocator: std.mem.Allocator, string: []const u8) !Result {
-            var buf = @as([4]u8, undefined);
-            const bytes = std.fmt.bufPrint(&buf, "{u}", .{separator}) catch unreachable;
-            var it = (try std.unicode.Utf8View.init(string)).iterator();
-            const first, const second, const sep_found = while (it.nextCodepointSlice()) |data| {
-                if (std.mem.eql(u8, bytes, data))
-                    break .{ string[0 .. it.i - bytes.len], string[it.i..], true };
-            } else if (@typeInfo(Second) == .Optional) .{ string, undefined, false } else return error.SeparatorNotFound;
-            const first_val = try util.parseStaticValue(First, first);
-            const second_val = if (@typeInfo(Second) == .Optional and !sep_found)
-                null
-            else if (comptime util.typeHasDynamicValue(Second, .pair, true))
-                try util.parseSlice(@typeInfo(Second).Pointer.child, allocator, second)
-            else
-                try util.parseStaticValue(Second, second);
-            return .{ first_val, second_val };
-        }
-    };
-}
-
-test "Pair.tryParse" {
-    inline for (.{ .{ Pair(u32, []const u8, '='), "92=bar", .{ 92, "bar" } }, .{ Pair(bool, [4]f32, '='), "true=1.2,3.4,5.6,7.8", .{ true, [4]f32{ 1.2, 3.4, 5.6, 7.8 } } }, .{ Pair([5]bool, bool, '='), "true,true,false,true,false=true", .{ [5]bool{ true, true, false, true, false }, true } }, .{ Pair([]const u8, []const u8, '='), "string=other-string", .{ "string", "other-string" } }, .{ Pair([2][]const u8, u32, '='), "a,string=1", .{ [2][]const u8{ "a", "string" }, 1 } }, .{ Pair(u0, u0, '='), "0=0", .{ 0, 0 } }, .{ Pair([]const u8, ?u16, '='), "foobar", .{ "foobar", null } } }) |data| {
-        const val = try data[0].tryParse(data[1]);
-        try std.testing.expectEqualDeep(val, data[2]);
-    }
-
-    const pair = Pair(enum { @"emit-bin", @"enable-asserts", @"link-mode", @"use-mold" }, []u32, '🄯');
-    const string = "use-mold🄯1,2,3,4,5";
-    const val = try pair.tryParseAlloc(std.testing.allocator, string);
-    defer std.testing.allocator.free(val[1]);
-    try std.testing.expectEqualDeep(val, .{ .@"use-mold", &[5]u32{ 1, 2, 3, 4, 5 } });
+    return @TypeOf(.{
+        .__argz_pair_tag = {},
+        .__argz_pair_result = .{ First, Second },
+        .__argz_pair_separator = separator,
+    });
 }
 
 pub const Flag = struct {
@@ -183,8 +132,8 @@ pub const Flag = struct {
         return if (comptime util.isDynamicMulti(flag.type))
             true
         else switch (comptime @typeInfo(flag.type)) {
-            .Pointer => |ptr| ptr.size == .Slice and flag.type != []const u8,
-            .Array => |arr| support_allocation and arr.child == []const u8,
+            .pointer => |ptr| ptr.size == .Slice and flag.type != []const u8,
+            .array => |arr| support_allocation and arr.child == []const u8,
             else => false,
         };
     }
@@ -193,30 +142,61 @@ pub const Flag = struct {
     /// to an alternate type name if found, and will cause a compile error if `flag.type` is
     /// equal to `void`.
     pub fn typeString(comptime flag: Flag, comptime ignore_alternate: bool) [:0]const u8 {
-        return if (!ignore_alternate and flag.alt_type_name != null) flag.alt_type_name.? else blk: {
-            const Inner = switch (@typeInfo(flag.type)) {
-                .Optional => |opt| opt.child,
-                else => flag.type,
-            };
-            break :blk switch (@typeInfo(Inner)) {
-                .Void => @compileError("Flag.typeString requires a non-void type"),
-                .Int => "INTEGER",
-                .Float => "FLOAT",
-                .Bool => "BOOLEAN",
-                .Pointer => if (Inner == []const u8) "STRING" else switch (@typeInfo(Inner)) {
-                    .Int => "INTEGER",
-                    .Float => "FLOAT",
-                    .Bool => "BOOLEAN",
-                    else => @compileError("invalid type for flag: '" ++ @typeName(flag.type) ++ "'"),
-                } ++ "...",
-                .Array => |arr| switch (arr.child) {
-                    .Int => "INTEGER",
-                    .Float => "FLOAT",
-                    .Bool => "BOOLEAN",
-                    .Pointer => if (arr.child == []const u8) "STRING" else @compileError("invalid type for flag"),
-                } ++ std.fmt.comptimePrint("[{d}]", .{arr.len}),
-                else => @compileError("invalid type for flag: '" ++ @typeName(type.flag) ++ "'"),
-            };
+        return if (!ignore_alternate and flag.alt_type_name != null) flag.alt_type_name.? else {
+            const check = struct {
+                fn func(comptime T: type) [:0]const u8 {
+                    if (comptime util.isCounter(T))
+                        return "COUNTER"
+                    else if (comptime util.isPair(T)) {
+                        const Result = @as(T, .{}).__argz_pair_result;
+                        const sep = @as(T, .{}).__argz_pair_separator;
+                        return comptime std.fmt.comptimePrint("{s}{u}{s}", .{ func(Result[0]), sep, func(Result[1]) });
+                    }
+                    if (comptime util.isBoundedMulti(T)) {
+                        const Child = @as(T, .{}).__argz_bmulti_child;
+                        if (comptime util.isPair(Child))
+                            return func(Child);
+                    } else if (comptime util.isDynamicMulti(T)) {
+                        const Child = @as(T, .{}).__argz_dmulti_child;
+                        if (comptime util.isPair(Child))
+                            return func(Child);
+                    }
+                    const Inner = switch (@typeInfo(T)) {
+                        .optional => |opt| opt.child,
+                        else => T,
+                    };
+                    return switch (@typeInfo(Inner)) {
+                        .void => @compileError("Flag.typeString requires a non-void type"),
+                        .int => "INTEGER",
+                        .float => "FLOAT",
+                        .bool => "BOOLEAN",
+                        .pointer => if (Inner == []const u8) "STRING" else switch (@typeInfo(Inner)) {
+                            .int => "INTEGER",
+                            .float => "FLOAT",
+                            .bool => "BOOLEAN",
+                            else => @compileError("invalid type for flag: '" ++ @typeName(flag.type) ++ "'"),
+                        } ++ "...",
+                        .array => |arr| switch (@typeInfo(arr.child)) {
+                            .int => "INTEGER",
+                            .float => "FLOAT",
+                            .bool => "BOOLEAN",
+                            .pointer => if (arr.child == []const u8) "STRING" else @compileError("invalid type for flag"),
+                            else => @compileError("invalid type for flag: '" ++ @typeName(flag.type) ++ "'"),
+                        } ++ std.fmt.comptimePrint("[{d}]", .{arr.len}),
+                        .@"enum" => |info| blk: {
+                            if (info.fields.len == 0)
+                                @compileError("empty enums are not supported");
+                            comptime var string = info.fields[0].name;
+                            inline for (info.fields[1..]) |field| {
+                                string = string ++ "|" ++ field.name;
+                            }
+                            break :blk string;
+                        },
+                        else => @compileError("invalid type for flag: '" ++ @typeName(flag.type) ++ "'"),
+                    };
+                }
+            }.func;
+            return check(flag.type);
         };
     }
 
@@ -245,23 +225,24 @@ pub const Positional = struct {
     }
 
     pub fn displayString(comptime pos: Positional) [:0]const u8 {
-        comptime return pos.display ++ pos.suffix();
+        return comptime pos.display ++ pos.suffix();
     }
 
     pub fn suffix(pos: Positional) [:0]const u8 {
         return switch (@typeInfo(pos.type)) {
-            .Array => |arr| std.fmt.comptimePrint("[{d}]", .{arr.len}),
-            .Pointer => if (pos.type == []const u8) "" else "...",
+            .array => |arr| std.fmt.comptimePrint("[{d}]", .{arr.len}),
+            .pointer => if (pos.type == []const u8) "" else "...",
+            else => "",
         };
     }
 };
 
 pub fn Counter(comptime T: type) type {
     return switch (@typeInfo(T)) {
-        .Int => |int| if (int.bits == 0)
+        .int => |int| if (int.bits == 0)
             @compileError("counter's backing int may not be `u0` or `i0`")
         else
-            .{ .__argz_counter_type = T },
+            @TypeOf(.{ .__argz_counter_type = T }),
         else => @compileError("counter's backing type must be an integer; `" ++ @typeName(T) ++ "` is not supported"),
     };
 }
@@ -273,5 +254,5 @@ pub fn BoundedMulti(comptime T: type, comptime max_elems: usize) type {
 }
 
 pub fn DynamicMulti(comptime T: type) type {
-    return @TypeOf(.{ .__argz_dmulti_child = T, .__argz_dmulti_backing_type = std.ArrayListUnmanaged(T) });
+    return @TypeOf(.{ .__argz_dmulti_child = T, .__argz_dmulti_backing_type = std.ArrayListUnmanaged(@import("Parser.zig").ResolveType(T)) });
 }

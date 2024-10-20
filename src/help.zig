@@ -1,5 +1,5 @@
 const std = @import("std");
-const root = @import("root.zig");
+const root = @import("argz.zig");
 const util = @import("util.zig");
 const ansi = @import("ansi.zig");
 
@@ -57,8 +57,10 @@ fn HelpFormatter(comptime cfg: root.Config, comptime variant: HelpVariant) type 
                 }
             }
         }
-        
-        pub fn format(self: @This(), 
+
+        pub fn format(self: @This()) void {
+            _ = self;
+        }
     };
 }
 

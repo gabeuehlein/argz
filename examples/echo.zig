@@ -7,21 +7,19 @@ const Flag = argz.Flag;
 // zig fmt: off
 const cfg = argz.Config{
     .top_level_flags = &[_]Flag{
-        .{ .short = 'q', .long = "quiet", .type = i32, .field_name = "quiet", },
-        .{ .short = 'b', .long = "bare", .type = void, .field_name = "bare", },
-        .{ .short = 'c', .long = "color", .type = ?bool, .field_name = "color" },
-        .{ .short = 'W', .long = null, .type = argz.DynamicMulti([]const u8), .field_name = "f_flags" }
-//        .{ .short = 'h', .long = "help", .type = argz.FlagHelp, .field_name = "help" }
+        .{ .short = 'h', .long = "help", .type = argz.FlagHelp, .field_name = "help", .help_msg = "show this help" },
     },
     .mode = .{ .standard = &[_]Positional{
         Positional{
-            .type = []const u8,
-            .display = "ARG",
+            .type = [][]const u8,
+            .display = "ARGS",
             .help_msg = "the arguments to print",
             .field_name = "args"
         },
     } },
-    .support_allocation = true
+    .program_name = "echo",
+    .program_description = "print the provided arguments to stdout",
+    .support_allocation = true,
 };
 // zig fmt: on
 
@@ -35,5 +33,9 @@ pub fn main() !void {
 
     var argv = argz.SystemArgs.init();
     var parser = argz.argParser(cfg, argv.args(), allocator) catch unreachable;
-    std.debug.print("{any}\n", .{try parser.parse()});
+    const opts = try parser.parse();
+    var stdout = std.io.getStdOut();
+    for (opts.positionals.args) |arg| {
+        try stdout.writer().print("{s}\n", .{arg});
+    }
 }

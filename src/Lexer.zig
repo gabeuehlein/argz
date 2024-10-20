@@ -163,7 +163,7 @@ pub fn nextToken(lexer: *Lexer, comptime flags: []const Flag, comptime word_mode
                     .positionals => blk: {
                         lexer.found_force_stop = true;
                         defer lexer.argi += 1;
-                        break :blk .{ .positional = .{ .span = .{ .argv_index = lexer.argi, .start = 0, .end = arg.len } } };
+                        break :blk .force_stop;
                     },
                 }
             else
@@ -188,62 +188,63 @@ pub fn nextToken(lexer: *Lexer, comptime flags: []const Flag, comptime word_mode
 pub fn longFlag(lexer: *Lexer, comptime flags: []const Flag, arg: []const u8) Token {
     const eq_index = std.mem.indexOfScalar(u8, arg, '=');
     const flag_end = eq_index orelse arg.len;
-    inline for (flags, 0..) |flag, i| {
+    return inline for (flags, 0..) |flag, i| {
         const long = flag.long orelse continue;
         if (std.mem.eql(u8, long, arg[2..flag_end])) {
             if (flag.type == void or flag.type == argz.FlagHelp) {
                 if (eq_index) |idx|
-                    return .{ .err = .{ .unexpected_value_for_long_flag = .{ .index = i, .value_span = .{ .argv_index = lexer.argi, .start = idx, .end = arg.len } } } };
+                    break .{ .err = .{ .unexpected_value_for_long_flag = .{ .index = i, .value_span = .{ .argv_index = lexer.argi, .start = idx, .end = arg.len } } } };
                 lexer.argi += 1;
-                return .{ .long_flag = .{ .index = i } };
+                break .{ .long_flag = .{ .index = i } };
             } else if (@typeInfo(flag.type) == .optional) {
                 if (eq_index) |idx| {
                     if (idx + 1 == arg.len)
-                        return .{ .err = .{ .mising_value_for_long_flag = .{ .index = i } } };
+                        break .{ .err = .{ .missing_value_for_long_flag = .{ .index = i } } };
                     defer lexer.argi += 1;
-                    return .{ .long_flag_with_value = .{ .index = i, .value_span = .{ .argv_index = lexer.argi, .start = idx, .end = arg.len } } };
+                    break .{ .long_flag_with_value = .{ .index = i, .value_span = .{ .argv_index = lexer.argi, .start = idx + 1, .end = arg.len } } };
                 }
                 defer lexer.argi += 1;
-                return .{ .long_flag = .{ .index = i } };
+                break .{ .long_flag = .{ .index = i } };
             } else {
                 if (eq_index) |idx| {
                     if (idx + 1 == arg.len)
-                        return .{ .err = .{ .missing_value_for_long_flag = .{ .index = i } } };
+                        break .{ .err = .{ .missing_value_for_long_flag = .{ .index = i } } };
                     defer lexer.argi += 1;
-                    return .{ .long_flag_with_value = .{ .index = i, .value_span = .{ .argv_index = lexer.argi, .start = idx, .end = arg.len } } };
+                    break .{ .long_flag_with_value = .{ .index = i, .value_span = .{ .argv_index = lexer.argi, .start = idx + 1, .end = arg.len } } };
                 } else {
                     if (lexer.argi + 1 == lexer.args.len) {
-                        return .{ .err = .{ .expected_value_for_long_flag = .{ .index = i } } };
+                        break .{ .err = .{ .expected_value_for_long_flag = .{ .index = i } } };
                     } else {
                         defer lexer.argi += 2;
-                        return .{ .long_flag_with_value = .{ .index = i, .value_span = .{ .argv_index = lexer.argi + 1, .start = 0, .end = lexer.args.get(lexer.argi + 1).len } } };
+                        break .{ .long_flag_with_value = .{ .index = i, .value_span = .{ .argv_index = lexer.argi + 1, .start = 0, .end = lexer.args.get(lexer.argi + 1).len } } };
                     }
                 }
             }
         }
-    } else return .{ .err = .{ .unknown_long_flag = .{ .span = .{ .argv_index = lexer.argi, .start = 2, .end = flag_end } } } };
+    } else .{ .err = .{ .unknown_long_flag = .{ .span = .{ .argv_index = lexer.argi, .start = 2, .end = flag_end } } } };
 }
 
 pub fn shortFlag(lexer: *Lexer, comptime flags: []const Flag, arg: []const u8) Token {
     const char_len, const char = decodeCharAtArgPos(arg, 1);
-    inline for (flags, 0..) |flag, i| {
+    return inline for (flags, 0..) |flag, i| {
         if (flag.short == char) {
             if (flag.type == void or flag.type == argz.FlagHelp) {
                 lexer.subargi = char_len + 1;
-                return .{ .short_flag = .{ .index = i } };
+                break .{ .short_flag = .{ .index = i } };
             } else if (@typeInfo(flag.type) == .optional) {
                 if (char_len + 1 < arg.len and arg[char_len + 1] == '=') {
                     if (char_len + 2 == arg.len) {
-                        return .{ .err = Token.Error{ .missing_value_for_short_flag = .{ .index = i } } };
+                        break .{ .err = Token.Error{ .missing_value_for_short_flag = .{ .index = i } } };
                     }
-                    defer {
-                        lexer.argi += 1;
-                    }
-                    return .{ .short_flag_with_value = Token.FlagWithValue{ .index = i, .value_span = .{ .argv_index = lexer.argi, .start = char_len + 1, .end = arg.len } } };
-                } else {}
+                    defer lexer.argi += 1;
+                    break .{ .short_flag_with_value = Token.FlagWithValue{ .index = i, .value_span = .{ .argv_index = lexer.argi, .start = char_len + 1, .end = arg.len } } };
+                } else {
+                    defer lexer.subargi = char_len + 1;
+                    break .{ .short_flag = Token.Flag{ .index = i } };
+                }
             } else {
                 if (char_len + 1 == arg.len) {
-                    return if (lexer.argi + 1 == lexer.args.len)
+                    break if (lexer.argi + 1 == lexer.args.len)
                         .{ .err = .{ .expected_value_for_short_flag = .{
                             .index = i,
                         } } }
@@ -257,34 +258,37 @@ pub fn shortFlag(lexer: *Lexer, comptime flags: []const Flag, arg: []const u8) T
                         lexer.argi += 1;
                         lexer.subargi = null;
                     }
-                    return .{ .short_flag_with_value = .{ .index = i, .value_span = .{ .argv_index = lexer.argi, .start = char_len, .end = arg.len } } };
+                    break .{ .short_flag_with_value = .{ .index = i, .value_span = .{ .argv_index = lexer.argi, .start = char_len + 1, .end = arg.len } } };
                 }
             }
         }
-    } else return .{ .err = .{ .unknown_short_flag = .{ .span = .{ .argv_index = lexer.argi, .start = 1, .end = char_len } } } };
+    } else .{ .err = .{ .unknown_short_flag = .{ .span = .{ .argv_index = lexer.argi, .start = 1, .end = char_len } } } };
 }
 
 pub fn shortChain(lexer: *Lexer, comptime flags: []const Flag, arg: []const u8, subargi: usize) Token {
     const char_len, const char = decodeCharAtArgPos(arg, subargi);
-    inline for (flags, 0..) |flag, i| {
+    return inline for (flags, 0..) |flag, i| {
         if (flag.short == char) {
             if (flag.type == void or flag.type == argz.FlagHelp) {
                 lexer.subargi = subargi + char_len + 1;
-                return .{ .short_flag = .{ .index = i } };
+                break .{ .short_flag = .{ .index = i } };
             } else if (@typeInfo(flag.type) == .optional) {
                 if (subargi + char_len + 1 < arg.len and arg[subargi + char_len + 1] == '=') {
                     if (subargi + char_len + 2 == arg.len) {
-                        return .{ .err = Token.Error{ .missing_value_for_short_flag = .{ .index = i } } };
+                        break .{ .err = Token.Error{ .missing_value_for_short_flag = .{ .index = i } } };
                     }
                     defer {
                         lexer.argi += 1;
                         lexer.subargi = null;
                     }
-                    return .{ .short_flag_with_value = Token.FlagWithValue{ .index = i, .value_span = .{ .argv_index = lexer.argi, .start = subargi + char_len + 1, .end = arg.len } } };
+                    break .{ .short_flag_with_value = Token.FlagWithValue{ .index = i, .value_span = .{ .argv_index = lexer.argi, .start = subargi + char_len + 1, .end = arg.len } } };
+                } else {
+                    defer lexer.subargi = subargi + char_len + 1;
+                    break .{ .short_flag = Token.Flag{ .index = i } };
                 }
             } else {
-                if (subargi + char_len + 1 == arg.len) {
-                    return if (lexer.argi + 1 == lexer.args.len)
+                if (subargi + char_len == arg.len) {
+                    break if (lexer.argi + 1 == lexer.args.len)
                         .{ .err = .{ .expected_value_for_short_flag = .{
                             .index = i,
                         } } }
@@ -298,11 +302,11 @@ pub fn shortChain(lexer: *Lexer, comptime flags: []const Flag, arg: []const u8, 
                         lexer.argi += 1;
                         lexer.subargi = null;
                     }
-                    return .{ .short_flag_with_value = .{ .index = i, .value_span = .{ .argv_index = lexer.argi, .start = subargi + char_len, .end = arg.len } } };
+                    break .{ .short_flag_with_value = .{ .index = i, .value_span = .{ .argv_index = lexer.argi, .start = subargi + char_len, .end = arg.len } } };
                 }
             }
         }
-    } else return .{ .err = .{ .unknown_short_flag = .{ .span = .{ .argv_index = lexer.argi, .start = subargi, .end = subargi + char_len } } } };
+    } else .{ .err = .{ .unknown_short_flag = .{ .span = .{ .argv_index = lexer.argi, .start = subargi, .end = subargi + char_len } } } };
 }
 
 fn decodeCharAtArgPos(arg: []const u8, pos: usize) struct { u3, u21 } {

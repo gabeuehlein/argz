@@ -1,8 +1,9 @@
 const std = @import("std");
-const root = @import("root.zig");
+const root = @import("argz.zig");
 const util = @import("util.zig");
 const Lexer = @import("Lexer.zig");
 const HelpPrinter = @import("help.zig").HelpPrinter;
+const values = @import("values.zig");
 const ansi = @import("ansi.zig");
 
 const assert = std.debug.assert;
@@ -30,146 +31,19 @@ fn nullSlice(comptime T: type) []T {
     return &s;
 }
 
-fn checkValidFlags(comptime flags: []const Flag, comptime support_allocation: bool) void {
-    comptime for (0.., flags) |i, flag| {
-        if (flag.hasDynamicValue(support_allocation) and !support_allocation) {
-            @compileError("type '" ++ @typeName(flag.type) ++ "' is not supported without support for dynamic memory allocation");
-        } else check: {
-            if (flag.field_name == null and flag.long == null) {
-                @compileError("flag must be representable with a long flag or have an explicitly set field name; info has been logged using @compileLog");
-            }
-            if (flag.type == root.FlagHelp)
-                break :check;
-            if (util.isBoundedMulti(flag.type) or util.isDynamicMulti(flag.type)) {
-                const Child = if (util.isBoundedMulti(flag.type))
-                    @as(flag.type, .{}).__argz_bmulti_child
-                else
-                    @as(flag.type, .{}).__argz_dmulti_child;
-                switch (@typeInfo(Child)) {
-                    .Int, .Float, .Bool, .Array, .Pointer => break :check,
-                    else => @compileError("invalid type for flag: '" ++ @typeName(flag.type) ++ "'"),
-                }
-            } else {
-                var optional = false;
-                var array_or_slice = false;
-                flag_check: switch (@typeInfo(flag.type)) {
-                    .Void, .Int, .Float, .Bool => {},
-                    .Optional => |opt| if (optional)
-                        @compileError("argz does not support parsing nested optionals")
-                    else {
-                        optional = true;
-                        continue :flag_check opt.child;
-                    },
-                    .pointer => |ptr| if (ptr.size != .Slice)
-                        @compileError("argz does not support parsing flags of type '" ++ @typeName(@Type(.{ .pointer = ptr })) ++ "'")
-                    else if (ptr.child == []const u8)
-                        break :flag_check
-                    else if (array_or_slice)
-                        @compileError("argz does not support parsing slices of '" ++ @typeName(@Type(.{ .pointer = ptr })) ++ "'")
-                    else {
-                        array_or_slice = true;
-                        optional = false;
-                        continue :flag_check ptr.child;
-                    },
-                }
-            }
-            const slice_or_array, const optional, const Child = switch (@typeInfo(flag.type)) {
-                .Void => break :check,
-                .Optional => |opt| .{ false, true, opt.child },
-                .Pointer => |ptr| if (ptr.size != .Slice)
-                    @compileError("argz does not support parsing non-slice pointer types")
-                else if (flag.type == []const u8)
-                    break :check
-                else
-                    .{ true, false, ptr.child },
-                .Array => |arr| if (arr.len == 0)
-                    @compileError("argz does not support parsing zero-sized arrays")
-                else
-                    .{ true, false, arr.child },
-                .Int, .Float, .Bool => .{ false, false, flag.type },
-                else => @compileError("invalid type for flag '" ++ @typeName(flag.type) ++ "' found"),
-            };
-            switch (@typeInfo(Child)) {
-                .Int, .Float, .Bool => {},
-                .Optional,
-                => if (optional)
-                    @compileError("argz does not support parsing nested optionals"),
-                .Pointer, .Array => if (Child != []const u8 and slice_or_array)
-                    @compileError("argz does not support parsing nested arrays or slices"),
-                else => @compileError("invalid type for flag: '" ++ @typeName(flag.type) ++ "'"),
-            }
-        }
-        for (0.., flags) |j, other_flag| {
-            if (i == j) continue;
-            if (flag.short != null and other_flag.short == flag.short) {
-                @compileError("duplicate short flag '-" ++ std.fmt.comptimePrint("{u}", .{flag.short.?} ++ "' found"));
-            }
-
-            if (flag.long) |long| {
-                if (other_flag.long != null and std.mem.eql(u8, long, other_flag.long.?)) {
-                    @compileError("duplicate long flag '--" ++ long ++ "' found");
-                }
-            }
-        }
-    };
-}
-
-fn checkValidMode(comptime mode: Mode, comptime cfg: Config) void {
-    comptime switch (mode) {
-        .commands => |cmds| {
-            for (cmds) |cmd| {
-                if (cmd.cmd.len == 0) @compileError("command text cannot be empty");
-                checkValidFlags(cmd.flags, cfg.support_allocation);
-                checkValidMode(cmd.mode, cfg.support_allocation);
-            }
-        },
-        .standard => |positionals| {
-            var optional = false;
-            var array_or_slice = false;
-            for (0.., positionals) |i, positional| {
-                if (positional.display.len == 0) @compileError("positional display text cannot be empty");
-                check: switch (@typeInfo(positional.type)) {
-                    .Void => @compileError("positional type cannot be void"),
-                    .Int, .Float, .Bool, .Array => {},
-                    .pointer => |ptr| if (ptr.size != .Slice)
-                        @compileError("argz does not support parsing positionals of type '" ++ @typeName(@Type(.{ .pointer = ptr })) ++ "'")
-                    else if (i + 1 != positionals.len)
-                        @compileError("variadic positionals must be at the end of the positional list")
-                    else if (ptr.child == []const u8)
-                        break :check
-                    else if (array_or_slice)
-                        @compileError("argz does not support parsing slices of type '" ++ @typeName(@Type(.{ .pointer = ptr })) ++ "'")
-                    else {
-                        array_or_slice = true;
-                        optional = false; // ?[]?T is allowed
-                        continue :check ptr.child;
-                    },
-                    .Optional => |opt| if (optional)
-                        @compileError("argz does not support parsing nested optional values")
-                    else {
-                        optional = true;
-                        continue :check opt.child;
-                    },
-                }
-            }
-        },
-    };
-}
-
-/// Gets the "real" type of a flag or positional, i.e. the backing
-/// type of a *Multi or a Counter. Assumes the type has already been
-/// checked, and therefore is valid.
-fn ResolveType(comptime T: type) type {
+pub fn ResolveType(comptime T: type) type {
     comptime return if (util.isBoundedMulti(T))
-        @as(T, .{}).__argz_bmulti_backing_type
+        ResolveType(@as(T, .{}).__argz_bmulti_backing_type)
     else if (util.isDynamicMulti(T))
-        @as(T, .{}).__argz_dmulti_backing_type
+        ResolveType(@as(T, .{}).__argz_dmulti_backing_type)
     else if (util.isCounter(T))
         @as(T, .{}).__argz_counter_type
     else if (T == void)
         bool
-    else
-        T;
+    else if (util.isPair(T)) blk: {
+        const v = @as(T, .{}).__argz_pair_result;
+        break :blk struct { v[0], v[1] };
+    } else T;
 }
 
 fn TypeFromFlags(comptime flags: []const Flag) type {
@@ -184,14 +58,13 @@ fn TypeFromFlags(comptime flags: []const Flag) type {
             .default_value = null,
         };
     }
-    return @Type(.{ .Struct = .{ .fields = &fields, .layout = .auto, .decls = &.{}, .is_tuple = false } });
+    return @Type(.{ .@"struct" = .{ .fields = &fields, .layout = .auto, .decls = &.{}, .is_tuple = false } });
 }
 
-/// Assume the mode has already been verified to be correct.
 fn TypeFromMode(comptime mode: Mode) type {
     comptime return switch (mode) {
         .commands => |commands| {
-            var enum_fields = @as([commands.len]Type.EnumField, undefined);
+            var enum_fields = @as([commands.len]Type.enum_field, undefined);
             var union_fields = @as([commands.len]Type.UnionField, undefined);
 
             for (0.., commands) |i, cmd| {
@@ -202,7 +75,7 @@ fn TypeFromMode(comptime mode: Mode) type {
                 union_fields[i] = Type.UnionField{ .name = cmd.fieldName(), .type = TypeFromMode(cmd.mode), .alignment = 0 };
             }
 
-            const EnumType = @Type(.{ .Enum = .{ .fields = enum_fields, .tag_type = std.math.IntFittingRange(0, commands.len), .is_exhaustive = true } });
+            const EnumType = @Type(.{ .@"enum" = .{ .fields = enum_fields, .tag_type = std.math.intFittingRange(0, commands.len), .is_exhaustive = true } });
             return @Type(.{ .Union = .{ .fields = union_fields, .layout = .auto, .tag_type = EnumType } });
         },
         .standard => |positionals| {
@@ -212,7 +85,7 @@ fn TypeFromMode(comptime mode: Mode) type {
                 struct_fields[i] = Type.StructField{ .name = pos.fieldName(), .type = ResolveType(pos.type), .default_value = null, .is_comptime = false, .alignment = 0 };
             }
 
-            return @Type(.{ .Struct = .{ .fields = &struct_fields, .layout = .auto, .decls = &.{}, .is_tuple = false } });
+            return @Type(.{ .@"struct" = .{ .fields = &struct_fields, .layout = .auto, .decls = &.{}, .is_tuple = false } });
         },
     };
 }
@@ -221,7 +94,7 @@ fn ArgParser(comptime cfg: root.Config) type {
     return struct {
         const Self = @This();
 
-        pub const ParseError = error{ArgParseError} || util.ParseValueError || Allocator.Error || error{Overflow};
+        pub const ParseError = anyerror; //error{ArgParseError} || util.ParseValueError || Allocator.Error || error{Overflow};
 
         const Options = ParseInnerReturnType(cfg.mode, cfg.top_level_flags);
 
@@ -233,6 +106,13 @@ fn ArgParser(comptime cfg: root.Config) type {
 
         const FlagType = util.FlagType;
 
+        fn parseValue(self: *const @This(), comptime T: type, string: []const u8) !ResolveType(T) {
+            if (cfg.support_allocation)
+                return try values.parseDynamicValue(T, self.allocator, string, false)
+            else
+                return try values.parseStaticValue(T, string);
+        }
+
         // zig fmt: off
         fn handleFlag(
             self: *@This(),
@@ -240,97 +120,98 @@ fn ArgParser(comptime cfg: root.Config) type {
             comptime index: usize,
             comptime command_stack: []const Command,
             comptime variant: FlagType,
+            comptime mode: Mode,
             val: ?[]const u8,
             flag_data: *TypeFromFlags(flags),
             flags_set: *std.StaticBitSet(flags.len)
         ) !void {
-            _ = command_stack;
             // zig fmt: on
             const flag = flags[index];
             if (comptime util.isCounter(flag.type)) {
                 @field(flag_data, flag.fieldName()) +|= 1;
                 return;
             } else if (comptime flag.type == root.FlagHelp) {
-                @compileError("TODO: printing autogenerated help");
-            } else if (!(util.isBoundedMulti(flag.type) or util.isDynamicMulti(flag.type)) and flags_set.isSet(index)) {
+                var stdout = std.io.getStdOut();
+                const stdoutw = stdout.writer();
+                try self.writeHelpFull(stdoutw, self.stdout_supports_ansi, flags, command_stack, mode);
+                std.process.exit(0); // TODO maybe free memory/run destructors before doing this?
+                return;
+            } else if (flags_set.isSet(index) and comptime !(util.isBoundedMulti(flag.type) or util.isDynamicMulti(flag.type))) {
                 return self.fail("flag '{s}' was found multiple times", .{flag.flagString(variant)});
             }
 
             if (comptime util.isBoundedMulti(flag.type)) {
                 const Child = @as(flag.type, .{}).__argz_bmulti_child;
                 if (val) |v|
-                    if (comptime flag.hasDynamicValue(cfg.support_allocation))
-                        try @field(flag_data, flag.fieldName()).append(try util.parseDynamicValue(Child, self.allocator, v))
-                    else
-                        try @field(flag_data, flag.fieldName()).append(try util.parseStaticValue(Child, v))
-                else if (@typeInfo(Child) == .Optional)
-                    try @field(flag_data, flag.fieldName()).append(null);
+                    try @field(flag_data, flag.fieldName()).append(try self.parseValue(Child, v))
+                else
+                    return self.fail("expected value for flag '{s}'", .{flag.flagString(variant)});
                 flags_set.set(index);
                 return;
             } else if (comptime util.isDynamicMulti(flag.type)) {
                 const Child = @as(flag.type, .{}).__argz_dmulti_child;
                 if (val) |v|
-                    if (comptime util.typeHasDynamicValue(Child, .flag, cfg.support_allocation))
-                        try @field(flag_data, flag.fieldName()).append(self.allocator, try util.parseDynamicValue(Child, self.allocator, v))
-                    else
-                        try @field(flag_data, flag.fieldName()).append(self.allocator, try util.parseStaticValue(Child, v))
-                else if (@typeInfo(Child) == .Optional)
-                    try @field(flag_data, flag.fieldName()).append(self.allocator, null);
+                    try @field(flag_data, flag.fieldName()).append(self.allocator, try self.parseValue(Child, v))
+                else
+                    return self.fail("expected value for flag '{s}'", .{flag.flagString(variant)});
                 flags_set.set(index);
                 return;
             } else if (flag.type == void) {
-                if (val != null) return self.fail("wasn't expecting a value for flag '{s}'", .{switch (variant) {
-                    .long => "--" ++ flag.long.?,
-                    .short => std.fmt.comptimePrint("-{u}", .{flag.short.?}),
-                }});
-                @field(flag_data, flag.fieldName()) = true;
-                flags_set.set(index);
-                return;
-            } else if (@typeInfo(flag.type) != .Optional and val == null) {
-                return self.fail("was expecting a value of type '{s}' for flag '{s}'", .{ flag.typeString(false), switch (variant) {
+                if (val != null) return self.fail("wasn't expecting value '{s}' for flag '{s}'", .{ val.?, switch (variant) {
                     .long => "--" ++ flag.long.?,
                     .short => std.fmt.comptimePrint("-{u}", .{flag.short.?}),
                 } });
-            } else switch (@typeInfo(flag.type)) {
-                .Int, .Float, .Bool => {
-                    const v = val.?;
-                    @field(flag_data, flag.fieldName()) = try util.parseStaticValue(flag.type, v);
+                @field(flag_data, flag.fieldName()) = true;
+                flags_set.set(index);
+                return;
+            } else if (comptime util.isPair(flag.type)) {
+                if (val) |v| {
+                    @field(flag_data, flag.fieldName()) = try self.parseValue(flag.type, v);
                     flags_set.set(index);
-                },
-                .Array => |arr| {
-                    const v = val.?;
-                    @field(flag_data, flag.fieldName()) = if (cfg.support_allocation and arr.child == []const u8)
-                        try util.parseSlice(flag.type, self.allocator, v)
-                    else
-                        try util.parseStaticValue(flag.type, v);
-                    flags_set.set(index);
-                },
-                .Optional => |opt| {
-                    if (val) |v|
-                        @field(flag_data, flag.fieldName()) = if (comptime util.typeHasDynamicValue(opt.child, .flag, cfg.support_allocation))
-                            try util.parseSlice(opt.child, self.allocator, v)
-                        else
-                            try util.parseStaticValue(opt.child, v)
-                    else
-                        @field(flag_data, flag.fieldName()) = null;
-                    flags_set.set(index);
-                },
-                else => @compileError("TODO: handle type '" ++ @typeName(flag.type) ++ "'"),
+                    return;
+                } else {
+                    return self.fail("expected value for flag '{s}'", .{flag.flagString(variant)});
+                }
+            } else if (@typeInfo(flag.type) == .optional) {
+                @field(flag_data, flag.fieldName()) = if (val) |v| try self.parseValue(flag.type, v) else null;
+                flags_set.set(index);
+                return;
+            } else if (val == null) {
+                return self.fail("was expecting a value of type '{s}' for flag '{s}'", .{ flag.typeString(false), flag.flagString(variant) });
+            } else {
+                @field(flag_data, flag.fieldName()) = try self.parseValue(flag.type, val.?);
+                flags_set.set(index);
+                return;
             }
         }
 
-        fn handleErr(self: *@This(), err: Lexer.Token.Error) ParseError {
+        fn handleErr(self: *@This(), err: Lexer.Token.Error, comptime flags: []const Flag, comptime commands: []const Command) ParseError {
+            const flagStringWithRuntimeIndex = struct {
+                fn func(comptime flags1: []const Flag, comptime variant: FlagType, idx: usize) [:0]const u8 {
+                    return switch (idx) {
+                        inline 0...flags.len - 1 => |i| {
+                            if (i >= flags1.len)
+                                unreachable;
+                            return flags[i].flagString(variant);
+                        },
+                        else => unreachable,
+                    };
+                }
+            }.func;
+            _ = commands;
             const args = self.lexer.args;
             return switch (err) {
-                .value_for_flag_with_no_arg => |data| self.fail("unexpected value '{s}' found for flag '{s}'", .{ args.getSpanText(data.value_span), args.getSpanText(data.flag_span) }),
-                .expected_value_for_flag => |span| self.fail("expected value for flag '{s}'", .{args.getSpanText(span)}),
-                .unexpected_positional => |idx| self.fail("found unexpected positional '{s}'", .{args.get(idx)}),
-                .unknown_command => |idx| self.fail("unknown command '{s}'", .{args.get(idx)}),
-                .unknown_long_flag => |span| self.fail("unknown long flag '{s}'", .{args.getSpanText(span)}),
-                .unknown_short_flag => |span| self.fail("unknown short flag '{s}'", .{args.getSpanText(span)}),
+                .unexpected_value_for_long_flag => |data| self.fail("unexpected value '{s}' found for flag '{s}'", .{ args.getSpanText(data.value_span), flagStringWithRuntimeIndex(flags, .long, data.index) }),
+                .unexpected_value_for_short_flag => |data| self.fail("unexpected value '{s}' found for flag '{s}'", .{ args.getSpanText(data.value_span), flagStringWithRuntimeIndex(flags, .short, data.index) }),
+                .missing_value_for_long_flag => |data| self.fail("expected value after the equals sign for flag '{s}'", .{flagStringWithRuntimeIndex(flags, .long, data.index)}),
+                .missing_value_for_short_flag => |data| self.fail("expected value after the equals sign for flag '{s}'", .{flagStringWithRuntimeIndex(flags, .short, data.index)}),
+                .expected_value_for_long_flag => |data| self.fail("expected value for flag '{s}'", .{flagStringWithRuntimeIndex(flags, .long, data.index)}),
+                .expected_value_for_short_flag => |data| self.fail("expected value for flag '{s}'", .{flagStringWithRuntimeIndex(flags, .short, data.index)}),
+                .unknown_command => |data| self.fail("unknown command '{s}'", .{args.get(data.span.argv_index)}),
+                .unknown_long_flag => |data| self.fail("unknown long flag '{s}'", .{args.getSpanText(data.span)}),
+                .unknown_short_flag => |data| self.fail("unknown short flag '{s}'", .{args.getSpanText(data.span)}),
                 .unexpected_force_stop => self.fail("unexpected force stop found", .{}),
                 .empty_argument => self.fail("stray empty argument found", .{}),
-                .short_flag_invalid_utf8 => self.fail("short flag contains invalid UTF-8", .{}),
             };
         }
 
@@ -368,10 +249,10 @@ fn ArgParser(comptime cfg: root.Config) type {
                 error.InvalidCharacter => self.fail("invalid character found when parsing value '{s}' for {s} '{s}'", args3),
                 error.InvalidEnumField => self.fail("invalid variant '{s}' found for {s} '{s}'", args3),
                 error.IntegerOverflow => self.fail("integer '{s}' out of range for {s} '{s}'", args3),
+                else => |e| self.fail("TODO: handle internal error '{s}'", .{@errorName(e)}),
             };
         }
 
-        /// Assumes that the flags and the mode have already been checked for validity.
         fn ParseInnerReturnType(comptime mode_or_cmd: anytype, comptime flags: []const Flag) type {
             const ModeData = TypeFromMode(switch (@TypeOf(mode_or_cmd)) {
                 Command => mode_or_cmd.mode,
@@ -390,75 +271,70 @@ fn ArgParser(comptime cfg: root.Config) type {
             const mode = if (@TypeOf(mode_or_cmd) == Command) mode_or_cmd.mode else mode_or_cmd;
             var result = @as(ParseInnerReturnType(mode_or_cmd, flags), undefined);
             var flags_set = std.StaticBitSet(flags.len).initEmpty();
-            errdefer if (cfg.support_allocation) inline for (0.., flags) |i, flag| fail: {
-                if (flags_set.isSet(i) and comptime flag.hasDynamicValue(true)) {
-                    if (comptime util.isDynamicMulti(flag.type)) {
-                        const Child = @as(flag.type, .{}).__argz_dmulti_child;
-                        if (@typeInfo(Child) == .Pointer) {
-                            const ChildChild = @typeInfo(Child).Pointer.child;
-                            for (@field(result.flags, flag.fieldName()).items) |elem| {
-                                if (ChildChild == []const u8) {
-                                    for (elem) |subelem| {
-                                        self.allocator.free(subelem);
-                                    }
-                                }
-                                self.allocator.free(elem);
-                            }
+            var variadic_positional_state = switch (mode) {
+                .standard => |positionals| if (positionals.len == 0 and !util.typeHasDynamicValue(positionals[positionals.len - 1].type))
+                    undefined
+                else
+                    std.ArrayListUnmanaged(@typeInfo(positionals[positionals.len - 1].type).pointer.child).empty,
+                .commands => undefined,
+            };
+            errdefer if (cfg.support_allocation) inline for (0.., flags) |i, flag| {
+                if (flags_set.isSet(i) and comptime util.typeHasDynamicValue(flag.type)) {
+                    values.freeDynamicValue(flag.type, &@field(result.flags, flag.fieldName()), self.allocator, false);
+                }
+                if (mode == .standard and mode.standard.len != 0) {
+                    if (comptime util.typeHasDynamicValue(mode.standard[mode.standard.len - 1].type)) {
+                        if (variadic_positional_state.items.len != 0) {
+                            values.freeDynamicValue(@TypeOf(variadic_positional_state.items), variadic_positional_state.items, self.allocator, false);
                         }
-                        @field(result.flags, flag.fieldName()).deinit(self.allocator);
-                        break :fail;
-                    } else if (comptime util.isBoundedMulti(flag.type)) {
-                        if (cfg.support_allocation and @typeInfo(@as(flag.type, .{}).__argz_dmulti_child) == .Pointer) {
-                            for (@field(result.flags, flag.fieldName()).items) |elem| {
-                                self.allocator.free(elem);
-                            }
-                        }
-                    }
-                    switch (comptime @typeInfo(flag.type)) {
-                        .Array => |arr| {
-                            comptime assert(arr.child == []const u8);
-                            for (@field(result.flags, flag.fieldName())) |elem| {
-                                self.allocator.free(elem);
-                            }
-                        },
-                        .Pointer => |ptr| {
-                            comptime assert(ptr.child == []const u8);
-                            for (@field(result.flags, flag.fieldName())) |elem| {
-                                self.allocator.free(elem);
-                            }
-                            self.allocator.free(@field(result.flags, flag.fieldName()));
-                        },
-                        else => unreachable,
                     }
                 }
             };
-            while (self.lexer.next(flags, mode, cfg.support_allocation)) |tok| {
+            while (self.lexer.nextToken(flags, switch (mode) {
+                .standard => .positionals,
+                .commands => |cmds| .{ .commands = cmds },
+            })) |tok| {
                 switch (tok) {
-                    .err => |e| return self.handleErr(e),
-                    inline .long_flag, .short_flag => |index, tag| switch (index) {
-                        inline 0...flags.len - 1 => |idx| self.handleFlag(flags, idx, cmd_stack, if (tag == .long_flag) .long else .short, null, &result.flags, &flags_set) catch |e| return self.handleInternalError(.{ flags[idx], if (tag == .long_flag) .long else .short }, null, null, e),
+                    .err => |e| return self.handleErr(e, flags, cmd_stack),
+                    inline .long_flag, .short_flag => |data, tag| switch (data.index) {
+                        inline 0...flags.len - 1 => |idx| self.handleFlag(flags, idx, cmd_stack, if (tag == .long_flag) .long else .short, mode, null, &result.flags, &flags_set) catch |e| return self.handleInternalError(.{ flags[idx], if (tag == .long_flag) .long else .short }, null, null, e),
                         else => unreachable,
                     },
                     inline .long_flag_with_value, .short_flag_with_value => |data, tag| switch (data.index) {
-                        inline 0...flags.len - 1 => |idx| self.handleFlag(flags, idx, cmd_stack, if (tag == .long_flag_with_value) .long else .short, self.lexer.args.getSpanText(data.value_span), &result.flags, &flags_set) catch |e| return self.handleInternalError(.{ flags[idx], if (tag == .long_flag) .long else .short }, null, self.lexer.args.getSpanText(data.value_span), e),
+                        inline 0...flags.len - 1 => |idx| self.handleFlag(flags, idx, cmd_stack, if (tag == .long_flag_with_value) .long else .short, mode, self.lexer.args.getSpanText(data.value_span), &result.flags, &flags_set) catch |e| return self.handleInternalError(.{ flags[idx], if (tag == .long_flag) .long else .short }, null, self.lexer.args.getSpanText(data.value_span), e),
                         else => unreachable,
                     },
                     .force_stop => {},
                     .positional => |index| {
-                        const arg = self.lexer.args.get(index);
+                        const arg = self.lexer.args.get(index.span.argv_index);
                         const positionals = mode.standard;
                         switch (self.positional_index) {
                             inline 0...@max(1, positionals.len) - 1 => |idx| {
                                 const pos = positionals[idx];
-                                if (@typeInfo(pos.type) != .Pointer) {
+                                if (pos.type == []const u8 or @typeInfo(pos.type) != .pointer) {
                                     self.positional_index += 1;
+                                    @field(result.positionals, pos.fieldName()) = try self.parseValue(pos.type, self.lexer.args.getSpanText(index.span));
+                                } else {
+                                    comptime assert(idx == positionals.len - 1);
+                                    try variadic_positional_state.append(self.allocator, try self.parseValue(@typeInfo(pos.type).pointer.child, arg));
                                 }
                             },
-                            else => return self.fail("extra positional argument foud: '{s}'", .{arg}),
+                            else => return self.fail("extra positional argument found: '{s}'", .{arg}),
                         }
                     },
                     inline else => |_, tag| @panic("TODO: " ++ @tagName(tag)),
                 }
+            }
+            switch (mode) {
+                .standard => |positionals| {
+                    if (positionals.len != 0) {
+                        const pos = positionals[positionals.len - 1];
+                        if (pos.type != u8 and @typeInfo(pos.type) == .pointer) {
+                            @field(result.positionals, positionals[positionals.len - 1].fieldName()) = try variadic_positional_state.toOwnedSlice(self.allocator);
+                        }
+                    }
+                },
+                .commands => {},
             }
             // TODO: check all required flags were found and do default initialization
             return result;
@@ -467,13 +343,116 @@ fn ArgParser(comptime cfg: root.Config) type {
         pub fn parse(self: *@This()) !Options {
             return self.parseInner(cfg.mode, cfg.top_level_flags, &.{});
         }
+
+        fn writeHelpFull(
+            self: *const @This(),
+            writer: anytype,
+            use_ansi: bool,
+            comptime flags: []const Flag,
+            comptime command_stack: []const Command,
+            comptime mode: Mode,
+        ) @TypeOf(writer).Error!void {
+            if (command_stack.len != 0)
+                if (cfg.program_description) |desc|
+                    try writer.writeAll(desc ++ "\n\n");
+
+            try writer.print("Usage: {}{}", .{ A(struct { []const u8 }, "{s}", .blue, .bold){ .inner = .{cfg.program_name orelse self.lexer.args.get(0)}, .enable = use_ansi }, blk: {
+                comptime var extra = @as([]const u8, "");
+                inline for (command_stack) |cmd| {
+                    extra = extra ++ " " ++ cmd.cmd;
+                }
+                break :blk A(struct { []const u8 }, "{s}", .blue, .bold){ .inner = .{extra}, .enable = use_ansi };
+            } });
+            switch (mode) {
+                .standard => |positionals| {
+                    comptime var nb_opt_args = 0;
+                    inline for (positionals) |positional| {
+                        try writer.writeByte(' ');
+                        if (@typeInfo(positional.type) == .optional) {
+                            nb_opt_args += 1;
+                            try writer.print("{}", .{A(struct { []const u8 }, "{s}", .cyan, .bold){ .inner = .{"["}, .enable = use_ansi }});
+                        }
+                        try writer.print("{}", .{A(struct { []const u8 }, "{s}", .cyan, .bold){ .inner = .{positional.displayString()}, .enable = use_ansi }});
+                    }
+                    if (nb_opt_args != 0)
+                        try writer.print("{}", .{A(struct { []const u8 }, "{s}", .cyan, .bold){ .inner = .{"]" ** nb_opt_args}, .enable = use_ansi }});
+                    try writer.writeByte('\n');
+                },
+                .commands => |commands| {
+                    try writer.print("{}\n", .{A(struct { []const u8 }, "{s}", .cyan, .bold){ .inner = .{"COMMAND"}, .enable = use_ansi }});
+                    if (commands.len == 0) {
+                        try writer.print("{}\n", .{A(struct { []const u8 }, "{s}", .yellow, .bold){ .inner = .{"Note: this project doesn't provide any valid values for 'COMMAND.' You may want to report this issue to the author(s)."}, .enable = use_ansi }});
+                    } else {
+                        const cmd_padding = comptime blk: {
+                            var max_pad = 0;
+                            for (commands) |cmd| {
+                                max_pad = @max(max_pad, std.unicode.utf8CountCodepoints(cmd.cmd) catch unreachable);
+                            }
+                            break :blk max_pad;
+                        };
+                        try writer.print("{}\n", .{A(struct { []const u8 }, "{s}", .green, .bold){ .inner = .{"COMMAND:"}, .enable = use_ansi }});
+                        inline for (commands) |cmd| {
+                            try writer.writeAll(" " ** 4);
+                            try writer.print("{}", .{A(struct { []const u8 }, "{s}", .cyan, .bold){ .inner = .{cmd.cmd}, .enable = use_ansi }});
+                            if (cmd.help_msg) |help| {
+                                const cp_len = comptime std.unicode.utf8CountCodepoints(cmd.cmd) catch unreachable;
+                                try writer.writeAll(" " ** (cmd_padding - cp_len) ++ help);
+                            }
+                        }
+                    }
+                },
+            }
+            const flag_padding, const flag_type_padding = comptime blk: {
+                var max_flag_pad = 0;
+                var max_flag_type_pad = 0;
+                for (flags) |flag| {
+                    var tmp = 0;
+                    if (flag.short != null) tmp += 2;
+                    if (flag.long) |long| tmp += 2 + (std.unicode.utf8CountCodepoints(long) catch unreachable);
+                    if (flag.short != null and flag.long != null) tmp += 2;
+                    max_flag_pad = @max(max_flag_pad, tmp);
+
+                    max_flag_type_pad = @max(max_flag_type_pad, if (flag.type != void and flag.type != root.FlagHelp)
+                        (std.unicode.utf8CountCodepoints(flag.typeString(false)) catch unreachable) + if (@typeInfo(flag.type) == .optional) 1 else 0
+                    else
+                        0);
+                }
+                break :blk .{ max_flag_pad, max_flag_type_pad };
+            };
+            inline for (flags) |flag| {
+                comptime var total_written = 0;
+                try writer.writeAll(" " ** 4);
+                if (flag.short) |short| {
+                    try writer.print("{}", .{A(struct { u21 }, "-{u}", .cyan, .bold){ .inner = .{short}, .enable = use_ansi }});
+                    total_written += 2;
+                    if (flag.long != null) {
+                        try writer.writeAll(", ");
+                        total_written += 2;
+                    }
+                }
+                if (flag.long) |long| {
+                    try writer.print("{}", .{A(struct { []const u8 }, "--{s}", .cyan, .bold){ .inner = .{long}, .enable = use_ansi }});
+                    total_written += comptime std.unicode.utf8CountCodepoints(flag.flagString(.long)) catch unreachable;
+                }
+                if (flag.type != void and flag.type != root.FlagHelp) {
+                    try writer.writeAll(" " ** (flag_padding - total_written + 1));
+                    try writer.print("{}", .{A(struct { []const u8 }, if (@typeInfo(flag.type) == .optional)
+                        "[={s}]"
+                    else
+                        "<{s}>", .cyan, .bold){ .inner = .{flag.typeString(false)}, .enable = use_ansi }});
+                    if (flag.help_msg) |help| {
+                        try writer.writeAll(" " ** (flag_type_padding - (std.unicode.utf8CountCodepoints(flag.typeString(false)) catch unreachable) + if (@typeInfo(flag.type) == .optional) 0 else 1) ++ help);
+                    }
+                } else if (flag.help_msg) |help| {
+                    try writer.writeAll(" " ** (flag_padding - total_written + 4) ++ " " ** flag_type_padding ++ help);
+                }
+                try writer.writeByte('\n');
+            }
+        }
     };
 }
 
 pub fn argParser(comptime cfg: Config, args: Args, allocator: ?Allocator) !ArgParser(cfg) {
-    comptime checkValidFlags(cfg.top_level_flags, cfg.support_allocation);
-    comptime checkValidMode(cfg.mode, cfg);
-
     const stdout_supports_ansi = switch (cfg.ansi_mode) {
         .force => true,
         .detect => std.io.getStdOut().supportsAnsiEscapeCodes(),
