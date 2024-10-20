@@ -18,6 +18,8 @@ pub fn build(b: *std.Build) void {
         .install_subdir = "doc/argz",
     });
 
+    _ = b.addModule("argz", .{ .root_source_file = b.path("src/argz.zig"), .optimize = optimize, .target = target });
+
     const Example = enum { echo, git, help };
     const example = b.option([]const u8, "example", "the example to run");
 

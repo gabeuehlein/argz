@@ -272,11 +272,11 @@ fn ArgParser(comptime cfg: root.Config) type {
             var result = @as(ParseInnerReturnType(mode_or_cmd, flags), undefined);
             var flags_set = std.StaticBitSet(flags.len).initEmpty();
             var variadic_positional_state = switch (mode) {
-                .standard => |positionals| if (positionals.len == 0 and !util.typeHasDynamicValue(positionals[positionals.len - 1].type))
-                    undefined
+                .standard => |positionals| if (positionals.len == 0 or !util.typeHasDynamicValue(positionals[positionals.len - 1].type))
+                    std.ArrayListUnmanaged(void).empty
                 else
                     std.ArrayListUnmanaged(@typeInfo(positionals[positionals.len - 1].type).pointer.child).empty,
-                .commands => undefined,
+                .commands => std.ArrayListUnmanaged(void).empty,
             };
             errdefer if (cfg.support_allocation) inline for (0.., flags) |i, flag| {
                 if (flags_set.isSet(i) and comptime util.typeHasDynamicValue(flag.type)) {
@@ -306,6 +306,8 @@ fn ArgParser(comptime cfg: root.Config) type {
                     },
                     .force_stop => {},
                     .positional => |index| {
+                        if (mode != .standard or mode.standard.len == 0)
+                            unreachable;
                         const arg = self.lexer.args.get(index.span.argv_index);
                         const positionals = mode.standard;
                         switch (self.positional_index) {

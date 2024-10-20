@@ -249,9 +249,9 @@ pub fn shortFlag(lexer: *Lexer, comptime flags: []const Flag, arg: []const u8) T
                             .index = i,
                         } } }
                     else blk: {
-                        lexer.argi += 1;
+                        lexer.argi += 2;
                         lexer.subargi = null;
-                        break :blk .{ .short_flag_with_value = .{ .index = i, .value_span = .{ .argv_index = lexer.argi, .start = 0, .end = lexer.args.get(lexer.argi).len } } };
+                        break :blk .{ .short_flag_with_value = .{ .index = i, .value_span = .{ .argv_index = lexer.argi - 1, .start = 0, .end = lexer.args.get(lexer.argi - 1).len } } };
                     };
                 } else {
                     defer {
@@ -293,9 +293,9 @@ pub fn shortChain(lexer: *Lexer, comptime flags: []const Flag, arg: []const u8, 
                             .index = i,
                         } } }
                     else blk: {
-                        lexer.argi += 1;
+                        lexer.argi += 2;
                         lexer.subargi = null;
-                        break :blk .{ .short_flag_with_value = .{ .index = i, .value_span = .{ .argv_index = lexer.argi, .start = 0, .end = lexer.args.get(lexer.argi).len } } };
+                        break :blk .{ .short_flag_with_value = .{ .index = i, .value_span = .{ .argv_index = lexer.argi - 1, .start = 0, .end = lexer.args.get(lexer.argi).len } } };
                     };
                 } else {
                     defer {
