@@ -64,7 +64,7 @@ fn TypeFromFlags(comptime flags: []const Flag) type {
 fn TypeFromMode(comptime mode: Mode) type {
     comptime return switch (mode) {
         .commands => |commands| {
-            var enum_fields = @as([commands.len]Type.enum_field, undefined);
+            var enum_fields = @as([commands.len]Type.EnumField, undefined);
             var union_fields = @as([commands.len]Type.UnionField, undefined);
 
             for (0.., commands) |i, cmd| {
@@ -72,11 +72,19 @@ fn TypeFromMode(comptime mode: Mode) type {
                     .name = cmd.fieldName(),
                     .value = i,
                 };
-                union_fields[i] = Type.UnionField{ .name = cmd.fieldName(), .type = TypeFromMode(cmd.mode), .alignment = 0 };
+                union_fields[i] = Type.UnionField{ .name = cmd.fieldName(), .type = switch (cmd.mode) {
+                    .standard => struct { positionals: TypeFromMode(cmd.mode), flags: TypeFromFlags(cmd.flags) },
+                    .commands => struct { command: TypeFromMode(cmd.mode), flags: TypeFromFlags(cmd.flags) },
+                }, .alignment = 0 };
             }
 
-            const EnumType = @Type(.{ .@"enum" = .{ .fields = enum_fields, .tag_type = std.math.intFittingRange(0, commands.len), .is_exhaustive = true } });
-            return @Type(.{ .Union = .{ .fields = union_fields, .layout = .auto, .tag_type = EnumType } });
+            const EnumType = @Type(.{ .@"enum" = .{
+                .fields = &enum_fields,
+                .tag_type = std.math.IntFittingRange(0, commands.len),
+                .is_exhaustive = true,
+                .decls = &.{},
+            } });
+            return @Type(.{ .@"union" = .{ .fields = &union_fields, .layout = .auto, .tag_type = EnumType, .decls = &.{} } });
         },
         .standard => |positionals| {
             var struct_fields = @as([positionals.len]Type.StructField, undefined);
@@ -157,10 +165,7 @@ fn ArgParser(comptime cfg: root.Config) type {
                 flags_set.set(index);
                 return;
             } else if (flag.type == void) {
-                if (val != null) return self.fail("wasn't expecting value '{s}' for flag '{s}'", .{ val.?, switch (variant) {
-                    .long => "--" ++ flag.long.?,
-                    .short => std.fmt.comptimePrint("-{u}", .{flag.short.?}),
-                } });
+                if (val != null) return self.fail("wasn't expecting value '{s}' for flag '{s}'", .{ val.?, flag.flagString(variant) });
                 @field(flag_data, flag.fieldName()) = true;
                 flags_set.set(index);
                 return;
@@ -253,17 +258,12 @@ fn ArgParser(comptime cfg: root.Config) type {
             };
         }
 
-        fn ParseInnerReturnType(comptime mode_or_cmd: anytype, comptime flags: []const Flag) type {
-            const ModeData = TypeFromMode(switch (@TypeOf(mode_or_cmd)) {
-                Command => mode_or_cmd.mode,
-                Mode => mode_or_cmd,
-                else => comptime unreachable,
-            });
+        fn ParseInnerReturnType(comptime mode: Mode, comptime flags: []const Flag) type {
+            const ModeData = TypeFromMode(mode);
             const Flags = TypeFromFlags(flags);
-            return switch (@TypeOf(mode_or_cmd)) {
-                Command => struct { command: ModeData, flags: Flags },
-                Mode => struct { positionals: ModeData, flags: Flags },
-                else => comptime unreachable,
+            return switch (mode) {
+                .commands => struct { command: ModeData, flags: Flags },
+                .standard => struct { positionals: ModeData, flags: Flags },
             };
         }
 
@@ -271,8 +271,8 @@ fn ArgParser(comptime cfg: root.Config) type {
             const mode = if (@TypeOf(mode_or_cmd) == Command) mode_or_cmd.mode else mode_or_cmd;
             var result = @as(ParseInnerReturnType(mode_or_cmd, flags), undefined);
             var flags_set = std.StaticBitSet(flags.len).initEmpty();
-            var variadic_positional_state = switch (mode) {
-                .standard => |positionals| if (positionals.len == 0 or !util.typeHasDynamicValue(positionals[positionals.len - 1].type))
+            var variadic_positional_state = comptime switch (mode) {
+                .standard => |positionals| if (positionals.len == 0 and !util.typeHasDynamicValue(positionals[positionals.len - 1].type))
                     std.ArrayListUnmanaged(void).empty
                 else
                     std.ArrayListUnmanaged(@typeInfo(positionals[positionals.len - 1].type).pointer.child).empty,
@@ -324,14 +324,30 @@ fn ArgParser(comptime cfg: root.Config) type {
                             else => return self.fail("extra positional argument found: '{s}'", .{arg}),
                         }
                     },
-                    inline else => |_, tag| @panic("TODO: " ++ @tagName(tag)),
+                    .command => |index| {
+                        if (comptime mode == .standard)
+                            unreachable;
+                        switch (mode) {
+                            .standard => unreachable,
+                            .commands => |cmds| switch (index.index) {
+                                inline 0...cmds.len - 1 => |idx| {
+                                    const data = try self.parseInner(cmds[idx].mode, cmds[idx].flags, cmd_stack ++ .{cmds[idx]});
+                                    result.command = @unionInit(@TypeOf(result.command), cmds[idx].fieldName(), switch (cmds[idx].mode) {
+                                        .standard => .{ .positionals = data.positionals, .flags = data.flags },
+                                        .commands => .{ .command = data.command, .flags = data.flags },
+                                    });
+                                },
+                                else => unreachable,
+                            },
+                        }
+                    },
                 }
             }
             switch (mode) {
                 .standard => |positionals| {
-                    if (positionals.len != 0) {
+                    if (comptime positionals.len != 0) {
                         const pos = positionals[positionals.len - 1];
-                        if (pos.type != u8 and @typeInfo(pos.type) == .pointer) {
+                        if (comptime pos.type != u8 and @typeInfo(pos.type) == .pointer) {
                             @field(result.positionals, positionals[positionals.len - 1].fieldName()) = try variadic_positional_state.toOwnedSlice(self.allocator);
                         }
                     }
