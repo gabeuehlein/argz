@@ -376,7 +376,20 @@ fn ArgParser(comptime cfg: root.Config) type {
                     if (flags[i].type == void) {
                         @field(result.flags, flags[i].fieldName()) = false;
                     } else if (flags[i].default_value) |default| {
-                        @field(result.flags, flags[i].fieldName()) = @as(*flags[i].type, default).*;
+                        @field(result.flags, flags[i].fieldName()) = switch (@typeInfo(flags[i].type)) {
+                            .pointer => blk: {
+                                comptime assert(flags[i].type == []const u8);
+                                const ptr = @as([*:0]const u8, @ptrCast(default));
+                                break :blk ptr[0..std.mem.indexOfSentinel(u8, 0, ptr)];
+                            },
+                            else => blk: {
+                                // FIXME: this ugly code is needed to properly coerce things like `enum`s. It can
+                                // probably be written in a less ugly way.
+                                var tmp: flags[i].type = undefined;
+                                @memcpy(@as(*[1]flags[i].type, &tmp), @as(*const [1]flags[i].type, @ptrCast(@alignCast(default))));
+                                break :blk tmp;
+                            },
+                        };
                     } else if (comptime !(flags[i].type == root.FlagHelp or util.isCounter(flags[i].type) or util.isBoundedMulti(flags[i].type) or util.isBoundedMulti(flags[i].type))) {
                         return self.fail("missing required flag: '{s}'", .{flags[i].flagString(if (flags[i].long != null) .long else .short)});
                     }
@@ -495,6 +508,16 @@ fn ArgParser(comptime cfg: root.Config) type {
                     }
                 } else if (flag.help_msg) |help| {
                     try writer.writeAll(" " ** (flag_padding - total_written + 4) ++ " " ** flag_type_padding ++ help);
+                }
+                if (flag.default_value) |default| {
+                    // FIXME: this ugly code is needed to properly coerce things like `enum`s. It can
+                    // probably be written in a less ugly way.
+                    var tmp: flag.type = undefined;
+                    @memcpy(@as(*[1]flag.type, &tmp), @as(*const [1]flag.type, @ptrCast(@alignCast(default))));
+                    if (@typeInfo(flag.type) == .@"enum")
+                        try writer.print(" (default '{s}')", .{@tagName(tmp)})
+                    else
+                        try writer.print(" (default '{any}')", .{tmp});
                 }
                 try writer.writeByte('\n');
             }
