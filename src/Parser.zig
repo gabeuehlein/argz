@@ -278,7 +278,7 @@ fn ArgParser(comptime cfg: root.Config) type {
             var result = @as(ParseInnerReturnType(mode_or_cmd, flags), undefined);
             var flags_set = std.StaticBitSet(flags.len).initEmpty();
             var variadic_positional_state = comptime switch (mode) {
-                .standard => |positionals| if (positionals.len == 0 and !util.typeHasDynamicValue(positionals[positionals.len - 1].type))
+                .standard => |positionals| if (positionals.len == 0 or !util.typeHasDynamicValue(positionals[positionals.len - 1].type))
                     std.ArrayListUnmanaged(void).empty
                 else
                     std.ArrayListUnmanaged(@typeInfo(positionals[positionals.len - 1].type).pointer.child).empty,
@@ -364,7 +364,7 @@ fn ArgParser(comptime cfg: root.Config) type {
                         if (self.positional_index < if (last.type != []const u8 and @typeInfo(last.type) == .pointer) positionals.len - 1 else positionals.len)
                             return self.fail("too few positional arguments found", .{});
                         const pos = positionals[positionals.len - 1];
-                        if (comptime pos.type != u8 and @typeInfo(pos.type) == .pointer) {
+                        if (comptime pos.type != []const u8 and @typeInfo(pos.type) == .pointer) {
                             @field(result.positionals, positionals[positionals.len - 1].fieldName()) = try variadic_positional_state.toOwnedSlice(self.allocator);
                         }
                     }

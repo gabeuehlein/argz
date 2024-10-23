@@ -16,6 +16,7 @@ pub const OptionType = enum {
 const bool_table = std.StaticStringMap(bool).initComptime(.{ .{ "true", true }, .{ "false", false } });
 
 pub fn typeHasDynamicValue(comptime T: type) bool {
+    assert(@inComptime());
     @setEvalBranchQuota(30000);
     if (comptime isCounter(T) or T == root.FlagHelp)
         return false
