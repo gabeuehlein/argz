@@ -136,7 +136,13 @@ fn ArgParser(comptime cfg: root.Config) type {
             // zig fmt: on
             const flag = flags[index];
             if (comptime util.isCounter(flag.type)) {
-                @field(flag_data, flag.fieldName()) +|= 1;
+                if (val != null) return self.fail("wasn't expecting value '{s}' for flag '{s}'", .{ val.?, flag.flagString(variant) });
+                if (!flags_set.isSet(index)) {
+                    @field(flag_data, flag.fieldName()) = 0;
+                    flags_set.set(index);
+                } else {
+                    @field(flag_data, flag.fieldName()) +|= 1;
+                }
                 return;
             } else if (comptime flag.type == root.FlagHelp) {
                 var stdout = std.io.getStdOut();
@@ -331,6 +337,14 @@ fn ArgParser(comptime cfg: root.Config) type {
                             .standard => unreachable,
                             .commands => |cmds| switch (index.index) {
                                 inline 0...cmds.len - 1 => |idx| {
+                                    if (comptime cmds[idx].is_help) {
+                                        comptime assert(cmds[idx].mode == .standard and cmds[idx].mode.standard.len == 0);
+                                        var stdout = std.io.getStdOut();
+                                        const stdoutw = stdout.writer();
+                                        try self.writeHelpFull(stdoutw, self.stdout_supports_ansi, flags, cmd_stack, mode);
+                                        std.process.exit(0); // TODO maybe free memory/run destructors before doing this?
+                                        unreachable;
+                                    }
                                     const data = try self.parseInner(cmds[idx].mode, cmds[idx].flags, cmd_stack ++ .{cmds[idx]});
                                     result.command = @unionInit(@TypeOf(result.command), cmds[idx].fieldName(), switch (cmds[idx].mode) {
                                         .standard => .{ .positionals = data.positionals, .flags = data.flags },
@@ -346,6 +360,9 @@ fn ArgParser(comptime cfg: root.Config) type {
             switch (mode) {
                 .standard => |positionals| {
                     if (comptime positionals.len != 0) {
+                        const last = positionals[positionals.len - 1];
+                        if (self.positional_index < if (last.type != []const u8 and @typeInfo(last.type) == .pointer) positionals.len - 1 else positionals.len)
+                            return self.fail("too few positional arguments found", .{});
                         const pos = positionals[positionals.len - 1];
                         if (comptime pos.type != u8 and @typeInfo(pos.type) == .pointer) {
                             @field(result.positionals, positionals[positionals.len - 1].fieldName()) = try variadic_positional_state.toOwnedSlice(self.allocator);
@@ -354,7 +371,17 @@ fn ArgParser(comptime cfg: root.Config) type {
                 },
                 .commands => {},
             }
-            // TODO: check all required flags were found and do default initialization
+            inline for (0..flags.len) |i| {
+                if (!flags_set.isSet(i)) {
+                    if (flags[i].type == void) {
+                        @field(result.flags, flags[i].fieldName()) = false;
+                    } else if (flags[i].default_value) |default| {
+                        @field(result.flags, flags[i].fieldName()) = @as(*flags[i].type, default).*;
+                    } else if (comptime !(flags[i].type == root.FlagHelp or util.isCounter(flags[i].type) or util.isBoundedMulti(flags[i].type) or util.isBoundedMulti(flags[i].type))) {
+                        return self.fail("missing required flag: '{s}'", .{flags[i].flagString(if (flags[i].long != null) .long else .short)});
+                    }
+                }
+            }
             return result;
         }
 
@@ -372,15 +399,17 @@ fn ArgParser(comptime cfg: root.Config) type {
         ) @TypeOf(writer).Error!void {
             if (command_stack.len != 0)
                 if (cfg.program_description) |desc|
-                    try writer.writeAll(desc ++ "\n\n");
+                    try writer.print("{s} - " ++ desc ++ "\n\n", .{cfg.program_name orelse self.lexer.args.get(0)});
 
-            try writer.print("Usage: {}{}", .{ A(struct { []const u8 }, "{s}", .blue, .bold){ .inner = .{cfg.program_name orelse self.lexer.args.get(0)}, .enable = use_ansi }, blk: {
+            try writer.print("{} {}{}", .{ A(struct { []const u8 }, "{s}", .green, .bold){ .inner = .{"Usage:"}, .enable = use_ansi }, A(struct { []const u8 }, "{s}", .blue, .bold){ .inner = .{cfg.program_name orelse self.lexer.args.get(0)}, .enable = use_ansi }, blk: {
                 comptime var extra = @as([]const u8, "");
                 inline for (command_stack) |cmd| {
                     extra = extra ++ " " ++ cmd.cmd;
                 }
                 break :blk A(struct { []const u8 }, "{s}", .blue, .bold){ .inner = .{extra}, .enable = use_ansi };
             } });
+            if (flags.len != 0)
+                try writer.print(" {}", .{A(struct { []const u8 }, "{s}", .cyan, .bold){ .inner = .{"[FLAGS]"}, .enable = use_ansi }});
             switch (mode) {
                 .standard => |positionals| {
                     comptime var nb_opt_args = 0;
@@ -397,9 +426,9 @@ fn ArgParser(comptime cfg: root.Config) type {
                     try writer.writeByte('\n');
                 },
                 .commands => |commands| {
-                    try writer.print("{}\n", .{A(struct { []const u8 }, "{s}", .cyan, .bold){ .inner = .{"COMMAND"}, .enable = use_ansi }});
+                    try writer.print(" {}\n", .{A(struct { []const u8 }, "{s}", .cyan, .bold){ .inner = .{"COMMAND"}, .enable = use_ansi }});
                     if (commands.len == 0) {
-                        try writer.print("{}\n", .{A(struct { []const u8 }, "{s}", .yellow, .bold){ .inner = .{"Note: this project doesn't provide any valid values for 'COMMAND.' You may want to report this issue to the author(s)."}, .enable = use_ansi }});
+                        try writer.print("{}\n", .{A(struct { []const u8 }, "{s}", .yellow, null){ .inner = .{"Note: this project doesn't provide any valid values for 'COMMAND.' You may want to report this issue to the author(s)."}, .enable = use_ansi }});
                     } else {
                         const cmd_padding = comptime blk: {
                             var max_pad = 0;
@@ -416,6 +445,7 @@ fn ArgParser(comptime cfg: root.Config) type {
                                 const cp_len = comptime std.unicode.utf8CountCodepoints(cmd.cmd) catch unreachable;
                                 try writer.writeAll(" " ** (cmd_padding - cp_len) ++ help);
                             }
+                            try writer.writeByte('\n');
                         }
                     }
                 },
@@ -437,6 +467,8 @@ fn ArgParser(comptime cfg: root.Config) type {
                 }
                 break :blk .{ max_flag_pad, max_flag_type_pad };
             };
+            if (flags.len != 0)
+                try writer.print("{}\n", .{A(struct { []const u8 }, "{s}", .green, .bold){ .inner = .{"FLAGS:"}, .enable = use_ansi }});
             inline for (flags) |flag| {
                 comptime var total_written = 0;
                 try writer.writeAll(" " ** 4);

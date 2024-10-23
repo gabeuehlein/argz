@@ -193,7 +193,7 @@ pub fn longFlag(lexer: *Lexer, comptime flags: []const Flag, arg: []const u8) To
         if (std.mem.eql(u8, long, arg[2..flag_end])) {
             if (flag.type == void or flag.type == argz.FlagHelp) {
                 if (eq_index) |idx|
-                    break .{ .err = .{ .unexpected_value_for_long_flag = .{ .index = i, .value_span = .{ .argv_index = lexer.argi, .start = idx, .end = arg.len } } } };
+                    break .{ .err = .{ .unexpected_value_for_long_flag = .{ .index = i, .value_span = .{ .argv_index = lexer.argi, .start = idx + 1, .end = arg.len } } } };
                 lexer.argi += 1;
                 break .{ .long_flag = .{ .index = i } };
             } else if (@typeInfo(flag.type) == .optional) {
