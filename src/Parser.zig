@@ -16,13 +16,6 @@ const Config = root.Config;
 const Allocator = std.mem.Allocator;
 const Args = @import("args.zig").Args;
 
-// TODO:
-//  1. Unify command-level and top-level Mode Parsing
-//  2. Implement fix suggestions
-//  3. Implement optional type parsing
-//  4. Implement forceful argument ending
-//  5. Implement changes to default initialization (to support strings without having to special-case it)
-
 const Type = std.builtin.Type;
 
 /// Returns a length-zero slice to be used as a dummy when creating `ArrayListUnmanaged` instances.
@@ -277,6 +270,7 @@ fn ArgParser(comptime cfg: root.Config) type {
             const mode = if (@TypeOf(mode_or_cmd) == Command) mode_or_cmd.mode else mode_or_cmd;
             var result = @as(ParseInnerReturnType(mode_or_cmd, flags), undefined);
             var flags_set = std.StaticBitSet(flags.len).initEmpty();
+            var found_command = false;
             var variadic_positional_state = comptime switch (mode) {
                 .standard => |positionals| if (positionals.len == 0 or !util.typeHasDynamicValue(positionals[positionals.len - 1].type))
                     std.ArrayListUnmanaged(void).empty
@@ -345,11 +339,14 @@ fn ArgParser(comptime cfg: root.Config) type {
                                         std.process.exit(0); // TODO maybe free memory/run destructors before doing this?
                                         unreachable;
                                     }
+                                    // TODO `data` and `result.command.<cmd.fieldName()>` should really be the same type so
+                                    // this hack isn't needed.
                                     const data = try self.parseInner(cmds[idx].mode, cmds[idx].flags, cmd_stack ++ .{cmds[idx]});
                                     result.command = @unionInit(@TypeOf(result.command), cmds[idx].fieldName(), switch (cmds[idx].mode) {
                                         .standard => .{ .positionals = data.positionals, .flags = data.flags },
                                         .commands => .{ .command = data.command, .flags = data.flags },
                                     });
+                                    found_command = true;
                                 },
                                 else => unreachable,
                             },
@@ -369,7 +366,7 @@ fn ArgParser(comptime cfg: root.Config) type {
                         }
                     }
                 },
-                .commands => {},
+                .commands => if (!found_command) return self.fail("no command provided", .{}),
             }
             inline for (0..flags.len) |i| {
                 if (!flags_set.isSet(i)) {
@@ -456,7 +453,7 @@ fn ArgParser(comptime cfg: root.Config) type {
                             try writer.print("{}", .{A(struct { []const u8 }, "{s}", .cyan, .bold){ .inner = .{cmd.cmd}, .enable = use_ansi }});
                             if (cmd.help_msg) |help| {
                                 const cp_len = comptime std.unicode.utf8CountCodepoints(cmd.cmd) catch unreachable;
-                                try writer.writeAll(" " ** (cmd_padding - cp_len) ++ help);
+                                try writer.writeAll(" " ** (cmd_padding - cp_len + 1) ++ help);
                             }
                             try writer.writeByte('\n');
                         }
@@ -507,7 +504,7 @@ fn ArgParser(comptime cfg: root.Config) type {
                         try writer.writeAll(" " ** (flag_type_padding - (std.unicode.utf8CountCodepoints(flag.typeString(false)) catch unreachable) + if (@typeInfo(flag.type) == .optional) 0 else 1) ++ help);
                     }
                 } else if (flag.help_msg) |help| {
-                    try writer.writeAll(" " ** (flag_padding - total_written + 4) ++ " " ** flag_type_padding ++ help);
+                    try writer.writeAll(" " ** (flag_padding - total_written + 1) ++ " " ** flag_type_padding ++ help);
                 }
                 if (flag.default_value) |default| {
                     // FIXME: this ugly code is needed to properly coerce things like `enum`s. It can
