@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const Formatter = std.fmt.Formatter;
+
 const TerminalColor = enum {
     red,
     green,
@@ -44,36 +46,46 @@ const TextModifier = enum {
     }
 };
 
-pub fn AnsiFormatter(comptime T: type, comptime fmt: []const u8, comptime color: ?TerminalColor, comptime text_mod: ?TextModifier) type {
-    return struct {
-        inner: T,
-        enable: bool,
-
-        pub fn format(f: @This(), comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) @TypeOf(writer).Error!void {
-            if (f.enable) {
-                if (color) |col| {
-                    try writer.print("\x1b[38;5;{d}m", .{col.getForegroundCode()});
-                }
-                if (text_mod) |mod| {
-                    try writer.print("\x1b[{d}m", .{mod.getAnsiSetCode()});
-                }
-            }
-            try writer.print(fmt, f.inner);
-            if (f.enable) {
-                if (text_mod) |mod| {
-                    try writer.print("\x1b[{d}m", .{mod.getAnsiClearCode()});
-                }
-                if (color != null) {
-                    try writer.writeAll("\x1b[39;5;0m");
-                }
-            }
-        }
+pub fn wrap(data: anytype, use_ansi: bool, color: ?TerminalColor, text_mod: ?TextModifier) Wrapper(@TypeOf(data)) {
+    return .{
+        .data = data,
+        .use_ansi = use_ansi,
+        .color = color,
+        .text_mod = text_mod,
     };
 }
 
-test AnsiFormatter {
-    const q = AnsiFormatter(u32, "{x}", .red, .bold){ .enable = true, .inner = 65535 };
-    var buf = @as([128]u8, undefined);
-    const b = std.fmt.bufPrint(&buf, "{}", .{q}) catch unreachable;
-    try std.testing.expectEqualStrings("\x1b[38;5;1m\x1b[1mffff\x1b[22m\x1b[39;5;0m", b);
+pub fn Wrapper(comptime T: type) type {
+    return struct {
+        data: T,
+        use_ansi: bool,
+        color: ?TerminalColor,
+        text_mod: ?TextModifier,
+    };
+}
+
+/// Requires that `@TypeOf(data) == Wrapper(T)` or `@TypeOf(data)` is a superset of `Wrapper(T)` for any `T`.
+fn fmtAnsi(data: anytype, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    if (data.use_ansi) {
+        if (data.color) |col|
+            try writer.print("\x1b[38;5;{d}m", .{col.getForegroundCode()});
+        if (data.text_mod) |mod|
+            try writer.print("\x1b[{d}m", .{mod.getAnsiSetCode()});
+    }
+    try std.fmt.format(writer, fmt, .{data.data});
+    if (data.use_ansi) {
+        if (data.text_mod) |mod|
+            try writer.print("\x1b[{d}m", .{mod.getAnsiClearCode()});
+        if (data.color != null)
+            try writer.writeAll("\x1b[39;5;0m");
+    }
+}
+
+pub fn ansiFormatter(
+    value: anytype,
+    emit_ansi_escape_codes: bool,
+    comptime color: ?TerminalColor,
+    comptime text_mod: ?TextModifier,
+) Formatter(fmtAnsi) {
+    return .{ .data = wrap(value, emit_ansi_escape_codes, color, text_mod) };
 }
