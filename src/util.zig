@@ -1,6 +1,7 @@
 const root = @import("argz.zig");
 const std = @import("std");
 const builtin = @import("builtin");
+const argz = @import("argz.zig");
 
 const assert = std.debug.assert;
 pub const ParseValueError = error{ IntegerOverflow, NotEnoughArguments, TooManyArguments, InvalidBool, InvalidEnumField } || std.fmt.ParseIntError || std.fmt.ParseFloatError;
@@ -15,82 +16,147 @@ pub const OptionType = enum {
 
 const bool_table = std.StaticStringMap(bool).initComptime(.{ .{ "true", true }, .{ "false", false } });
 
-pub fn typeHasDynamicValue(comptime T: type) bool {
-    assert(@inComptime());
-    @setEvalBranchQuota(30000);
-    if (comptime isCounter(T) or T == root.FlagHelp)
-        return false
-    else if (comptime isBoundedMulti(T)) comptime {
-        return typeHasDynamicValue(@as(T, .{}).__argz_bmulti_child);
-    } else if (comptime isDynamicMulti(T)) {
-        return true;
-    } else if (comptime isPair(T)) {
-        const PairResult = @as(T, .{}).__argz_pair_result;
-        inline for (PairResult) |Ty| {
-            switch (@typeInfo(Ty)) {
-                .int, .float, .bool, .optional, .array, .pointer => return true,
-                else => @compileError("invalid type: '" ++ @typeName(Ty) ++ "'"),
-            }
+pub const ArgzType = union(enum) {
+    multi: struct {
+        storage: union(enum) {
+            bounded: struct { max_elems: usize },
+            dynamic,
+        },
+        child: type,
+    },
+    counter: struct {
+        backing_int: type,
+    },
+    pair: struct {
+        lhs_type: type,
+        rhs_type: type,
+        separator: u21,
+    },
+    flag_help,
+    trailing,
+    zig_primitive: type,
+
+    pub fn fromZigType(comptime T: type) ArgzType {
+        comptime {
+            return if (isCounter(T))
+                .{ .counter = .{ .backing_int = @as(T, .{}).__argz_counter_type } }
+            else if (isBoundedMulti(T))
+                .{ .multi = .{ .storage = .{
+                    .bounded = .{
+                        .max_elems = @as(T, .{}).__argz_bmulti_len,
+                    },
+                }, .child = @as(T, .{}).__argz_bmulti_child } }
+            else if (isDynamicMulti(T))
+                .{ .multi = .{ .storage = .dynamic, .child = @as(T, .{}).__argz_dmulti_child } }
+            else if (isPair(T)) blk: {
+                const val = @as(T, .{});
+                const res = val.__argz_pair_result;
+                break :blk .{ .pair = .{ .lhs_type = res[0], .rhs_type = res[1], .separator = val.__argz_pair_separator } };
+            } else if (T == argz.FlagHelp)
+                .flag_help
+            else if (T == argz.Trailing)
+                .trailing
+            else switch (@typeInfo(T)) {
+                .int, .float, .bool, .void, .array, .pointer, .optional => .{ .zig_primitive = T },
+                else => @compileError("internal argz error: found unexpected type '" ++ @typeName(T) ++ "'"),
+            };
         }
-        return typeHasDynamicValue(PairResult[0]) or typeHasDynamicValue(PairResult[1]);
-    } else {
-        comptime var array = false;
-        comptime var optional = false;
-        comptime var slice = false;
-        comptime return sw: switch (@typeInfo(T)) {
-            .int, .float, .bool, .@"enum" => break :sw false,
-            .void => if (optional or slice or array) @compileError("invalid type: '" ++ @typeName(T) ++ "'") else break :sw false,
-            .array => |arr| if (slice or array) @compileError("nested arrays or slices are not supported") else {
-                array = true;
-                continue :sw @typeInfo(arr.child);
+    }
+
+    /// Returns `true` if the type represented by `ty` requires a memory allocator to parse.
+    pub fn requiresAllocator(comptime ty: ArgzType) bool {
+        return switch (ty) {
+            .flag_help, .trailing_positionals, .counter => false,
+            .multi => |m| m.storage == .dynamic,
+            .pair => |p| ArgzType.fromZigType(p.lhs_type).requiresAllocator() or ArgzType.fromZigType(p.rhs_type).requiresAllocator(),
+            .zig_primitive => |prim| switch (@typeInfo(prim)) {
+                .pointer => prim != []const u8,
+                .optional => |info| info.child != []const u8,
+                else => false,
             },
-            .optional => |opt| {
-                if (slice)
-                    @compileError("invalid type: '" ++ @typeName(T) ++ "'");
-                optional = true;
-                continue :sw @typeInfo(opt.child);
-            },
-            .pointer => |ptr| {
-                if (ptr.size != .Slice)
-                    @compileError("pointer types must be slices");
-                if (ptr.child == u8 and ptr.sentinel == null and ptr.is_const)
-                    break :sw slice
-                else if (slice or array)
-                    @compileError("invalid type: '" ++ @typeName(T) ++ "'")
-                else {
-                    slice = true;
-                    continue :sw @typeInfo(ptr.child);
-                }
-            },
-            else => unreachable,
         };
     }
-}
+};
 
-pub fn runtimeCheck(check: bool, comptime fmt: []const u8, args: anytype) void {
-    if (!std.debug.runtime_safety)
-        return; // don't do anything on ReleaseFast/ReleaseSmall
-
-    if (!check) {
-        var buf = @as([4096]u8, undefined);
-        const msg = std.fmt.bufPrint(&buf, "fatal argz arror: " ++ fmt, args) catch blk: {
-            const truncated_msg = "... <truncated>";
-            @memcpy(buf[buf.len - truncated_msg.len ..][0..truncated_msg.len], truncated_msg);
-            break :blk &buf;
-        };
-        @panic(msg);
+pub fn validateType(
+    comptime T: type,
+    comptime purpose: enum {
+        flag,
+        pair_in_flag,
+        positional,
+        positional_in_flag,
+    },
+    comptime listlike_parent: bool,
+    comptime pair_lhs: bool,
+    comptime support_allocation: bool,
+) void {
+    const info = ArgzType.fromZigType(T);
+    switch (info) {
+        .pair => |p| switch (purpose) {
+            .flag, .positional => {
+                const new_purpose = switch (purpose) {
+                    .flag => .pair_in_flag,
+                    .positional => .positional_in_flag,
+                    else => unreachable,
+                };
+                validateType(p.lhs_type, new_purpose, listlike_parent, false, support_allocation);
+                validateType(p.rhs_type, new_purpose, listlike_parent, false, support_allocation);
+            },
+            else => @compileError("invalid type: '" ++ @typeName(T) ++ "'"),
+        },
+        .counter => {
+            if (purpose != .flag)
+                @compileError("type '" ++ @typeName(T) ++ "' can only be the type of a flag");
+        },
+        .multi => |multi| {
+            if (purpose != .flag)
+                @compileError("type '" ++ @typeName(T) ++ "' can only be the type of a flag");
+            if (listlike_parent)
+                @compileError("invalid type: '" ++ @typeName(T) ++ "'");
+            switch (multi.storage) {
+                .bounded => |size| if (size == 0)
+                    @compileError("repeatable flag cannot have an upper occurance limit of 0"),
+                .dynamic => if (!support_allocation)
+                    @compileError("repeatable flag cannot have a variable occurance limit without an allocator"),
+            }
+            switch (ArgzType.fromZigType(multi.child)) {
+                .pair => |pair| {
+                    validateType(pair.lhs_type, .pair_in_flag, true, true, support_allocation);
+                    validateType(pair.rhs_type, .pair_in_flag, true, false, support_allocation);
+                },
+                .zig_primitive => validateType(multi.child, .flag, true, support_allocation),
+                else => @compileError("invalid type: '" ++ @typeName(T) ++ "'"),
+            }
+        },
+        .zig_primitive => |prim| switch (@typeInfo(prim)) {
+            .pointer => |ptr| if (!support_allocation and (!(ptr.child == u8 and ptr.is_const) and ptr.sentinel != null))
+                @compileError("type '" ++ @typeName(T) ++ "' is not supported without an allocator")
+            else if (listlike_parent and !(ptr.child == u8 and ptr.is_const))
+                @compileError("type '" ++ @typeName(T) ++ "' cannot be the child of a list-like type"),
+            // This case is to prevent needing to add another parameter to validateType
+            .array => |arr| if (listlike_parent)
+                @compileError("type '" ++ @typeName(T) ++ "' cannot be the child of a list-like type")
+            else switch (@typeInfo(arr)) {
+                .pointer => |ptr| if (!(ptr.child == u8 and ptr.is_const))
+                    @compileError("invalid type: '" ++ @typeName(T) ++ "'"),
+                else => validateType(arr.child, purpose, true, support_allocation),
+            },
+            .int, .float, .bool, .void => {},
+            .optional => |opt| if (pair_lhs)
+                @compileError("optional type cannot be the LHS of a pair")
+            else if (@typeInfo(opt.child) == .optional)
+                @compileError("optional types cannot be nested")
+            else switch (purpose) {
+                .flag, .positional => validateType(opt.child, purpose, true, false, support_allocation),
+                .pair_in_flag, .pair_in_positional => @compileError("pairs of values cannot be nested"),
+            },
+            else => @compileError("invalid type: '" ++ @typeName(T) ++ "'"),
+        },
+        .flag_help => if (purpose != .flag)
+            @compileError("type '" ++ @typeName(T) ++ "' can only be the type of a flag"),
+        .trailing_positionals => if (purpose != .positional)
+            @compileError("type '" ++ @typeName(T) ++ "' can only be the type of a positional argument"),
     }
-}
-
-pub fn hammingDist(a: []const u8, b: []const u8) usize {
-    const maxSize = std.math.maxInt(usize) / 8; // `usize` bytes large
-    runtimeCheck(a.len < maxSize and b.len < maxSize, "tried computing the Hamming Distance of (an) exceptionally large byte slice(s) (lengths {d} and {d}); possible data corruption?", .{ a.len, b.len });
-
-    var result = @as(usize, 0);
-    for (a, b) |ae, be| {
-        result += @popCount(ae ^ be);
-    }
-    return result;
 }
 
 pub fn isCounter(comptime T: type) bool {
@@ -106,7 +172,7 @@ pub fn isCounter(comptime T: type) bool {
 }
 
 pub fn isBoundedMulti(comptime T: type) bool {
-    return @typeInfo(T) == .@"struct" and @hasField(T, "__argz_bmulti_child") and @TypeOf(@as(T, .{}).__argz_bmulti_child) == type and @hasField(T, "__argz_bmulti_len") and @hasField(T, "__argz_bmulti_backing_type");
+    return @typeInfo(T) == .@"struct" and @hasField(T, "__argz_bmulti_child") and @TypeOf(@as(T, .{}).__argz_bmulti_child) == type and @hasField(T, "__argz_bmulti_len");
 }
 
 pub fn isDynamicMulti(comptime T: type) bool {

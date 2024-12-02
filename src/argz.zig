@@ -10,8 +10,8 @@ pub const Args = args.Args;
 pub const OwnedArgs = args.OwnedArgs;
 pub const SystemArgs = args.SystemArgs;
 
-/// Dummy type indicating that a flag should serve to print a message showing usage information.
-pub const FlagHelp = @TypeOf(.{ .__argz_flaghelp_tag = {} });
+/// Dummy type indicating that a flag should serve to print a message showing usage information and exit.
+pub const FlagHelp = struct {};
 
 pub const argParser = @import("Parser.zig").argParser;
 pub const HelpPrinter = @import("help.zig").HelpPrinter;
@@ -45,11 +45,7 @@ pub const Config = struct {
     program_name: ?[]const u8 = null,
     /// A brief description of how the program should be used.
     program_description: ?[]const u8 = null,
-    /// Whether to suggest adding a `--` argument in order to
-    /// make a would-be flag or command be treated as a positional instead.
-    suggest_add_terminator: bool = true,
-    /// Top-level flags for the CLI. These will be ignored after any commands
-    /// if they have a flag with the same identifier.
+    /// Top-level flags for the CLI.
     top_level_flags: []const Flag = &.{},
     /// The top-level [Mode](argz.Mode) for the CLI. This determines whether a project
     /// is command-based or flag-based.
@@ -57,16 +53,7 @@ pub const Config = struct {
     /// Whether to support dynamic memory allocation. If `true`, variable length slices become
     /// legal as option types. It is the programmer's responsibility to free them when no longer needed.
     ///
-    /// In the case of a flag of positional being of type `[]const u8`, no allocation will be performed;
-    /// the argument will be returned as-is from the arguments provided by the user. If the type is an array or slice
-    /// *and* the type is for a flag, then strings will be cloned by the allocator, with commas being able to
-    /// be escaped using a backslash (e.g. the string "1\,2,3" will produce the array `.{ "1,2", "3" }`). These strings
-    /// *will* have to be freed by the programmer.
-    ///
-    /// Arrays or slices of positionals are not handled as above -- as positionals are unique to different arguments,
-    /// there is no possible ambiguities between separate arguments, and as such the argument provided by the user
-    /// will be used as-is in the respective slice. Note that *the slice containing the strings* is still dynamically
-    /// allocated, and must be freed by the user, only the strings contained within are not.
+    /// Note that slices are to be passed as comma-separated strings containing the data
     support_allocation: bool,
 };
 
@@ -97,10 +84,15 @@ pub const Command = struct {
 pub fn Pair(comptime First: type, comptime Second: type, comptime separator: u21) type {
     return @TypeOf(.{
         .__argz_pair_tag = {},
-        .__argz_pair_result = .{ First, Second },
+        .__argz_pair_result = struct { First, Second },
         .__argz_pair_separator = separator,
     });
 }
+
+pub const FlagAlias = union(enum) {
+    long: ?[:0]const u8,
+    short: ?u21,
+};
 
 pub const Flag = struct {
     /// The short form of the flag. If equal to `null`, `long` must have a valid representation.
@@ -109,20 +101,20 @@ pub const Flag = struct {
     long: ?[:0]const u8 = null,
     /// A brief description of the flag's purpose and usage.
     help_msg: ?[]const u8 = null,
-    /// The name of the field representing the flag in the resulting flag `struct`. If `null`, will
-    /// be equivalent to either `long` or `short` represented as a UTF-8 encoded string.
+    /// The name of the field representing the flag in the resulting flag `struct`. If `null`, the
+    /// field name will be equal to the flag's long form, or the short form if no long form was provided.
     field_name: ?[:0]const u8 = null,
     /// The type of the flag. If equal to `void`, then the corresponding `struct` field will be a
     /// boolean indicating whether this flag was found in the argument list.
-    type: type,
-    /// A default value for the flag. A value of `null` indicates that this flag *must* be supplied
-    /// by the user. Otherwise, the data pointed to must have a type equal to the `type` provided.
+    type: type = void,
+    /// A default value for the flag.
     default_value: ?*const anyopaque = null,
     /// An alternative type name to display in place of a flag's type. For example, one might specify
-    /// this to be `"PATH"` if a string argument should represent a filesystem path. By convention,
-    /// this should be in all caps, with spaces being used to separate words, meaning that a string
-    /// like `"FRIED CHICKEN"` should be preferred over `"fried chicken"` or `"FRIED_CHICKEN"`.
+    /// this to be `"PATH"` if a string argument should represent a filesystem path.
     alt_type_name: ?[:0]const u8 = null,
+    /// A list of potential aliases for this flag. No alias may be the same as another alias or the flag's
+    /// primary long or short form.
+    aliases: []const FlagAlias = &.{},
 
     pub fn fieldName(flag: Flag) [:0]const u8 {
         return flag.field_name orelse (flag.long orelse std.fmt.comptimePrint("{u}", .{flag.short.?}));
@@ -216,6 +208,10 @@ pub const Positional = struct {
     /// [fieldName] will return `display` instead.
     field_name: ?[:0]const u8,
     /// The positional's type. Can *not* be `void`. May be an optional value if and only if all successive positionals are optional.
+    ///
+    /// Optionally, the very last positional in a positional list may have the type [Trailing], which will collect every string after
+    /// a force-stop sequence (`"--"`). The actual type of the positional will be `[]const [:0]const u8`, which will point
+    /// to the strings in the arguments passed to the parser.
     type: type,
     /// A help string describing the positional argument's use.
     help_msg: ?[]const u8 = null,
@@ -237,20 +233,14 @@ pub const Positional = struct {
     }
 };
 
+pub const Trailing = struct {};
+
 pub fn Counter(comptime T: type) type {
-    return switch (@typeInfo(T)) {
-        .int => |int| if (int.bits == 0)
-            @compileError("counter's backing int may not be `u0` or `i0`")
-        else
-            @TypeOf(.{ .__argz_counter_type = T }),
-        else => @compileError("counter's backing type must be an integer; `" ++ @typeName(T) ++ "` is not supported"),
-    };
+    return @TypeOf(.{ .__argz_counter_type = T });
 }
 
 pub fn BoundedMulti(comptime T: type, comptime max_elems: usize) type {
-    if (max_elems == 0)
-        @compileError("cannot have a `BoundedMulti` with 0 max elements");
-    return @TypeOf(.{ .__argz_bmulti_child = T, .__argz_bmulti_len = max_elems, .__argz_bmulti_backing_type = std.BoundedArray(T, max_elems) });
+    return @TypeOf(.{ .__argz_bmulti_child = T, .__argz_bmulti_len = max_elems });
 }
 
 pub fn DynamicMulti(comptime T: type) type {

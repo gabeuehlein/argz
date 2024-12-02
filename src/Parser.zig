@@ -24,9 +24,14 @@ fn nullSlice(comptime T: type) []T {
     return &s;
 }
 
-pub fn ResolveType(comptime T: type) type {
+
+pub fn ResolveInnermostType(comptime T: type) type {
+    assert(@inComptime());
+
+    var listlike_parent = false;
+    
     comptime return if (util.isBoundedMulti(T))
-        ResolveType(@as(T, .{}).__argz_bmulti_backing_type)
+        ResolveInnermostType(@as(T, .{}).__argz_bmulti_backing_type)
     else if (util.isDynamicMulti(T))
         ResolveType(@as(T, .{}).__argz_dmulti_backing_type)
     else if (util.isCounter(T))
@@ -292,7 +297,7 @@ fn ArgParser(comptime cfg: root.Config) type {
             };
             while (self.lexer.nextToken(flags, switch (mode) {
                 .standard => .positionals,
-                .commands => |cmds| .{ .commands = cmds },
+                .commands => |cmds| .{ .commands = .{ .commands = cmds, .default = null } },
             })) |tok| {
                 switch (tok) {
                     .err => |e| return self.handleErr(e, flags, cmd_stack),

@@ -9,10 +9,15 @@ const bool_table = std.StaticStringMap(bool).initComptime(.{
 });
 
 pub fn ParseStaticValueReturnType(comptime T: type) type {
-    return if (util.isPair(T))
-        ParsePairReturnType(T)
-    else
-        T;
+    const tag = util.ArgzType.fromZigType(T);
+    return switch (tag) {
+        .pair => |p| struct { p.lhs_type, p.rhs_type },
+        .zig_primitive => |ty| if (ty == void)
+            @compileError("internal argz error: unexpected type 'void' found")
+        else
+            ty,
+        else => @compileError("internal argz error: unexpected type '" ++ @typeName(T) ++ "' found"),
+    };
 }
 
 pub fn ParseDynamicValueReturnType(comptime T: type) type {

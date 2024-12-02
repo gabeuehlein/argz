@@ -2,7 +2,7 @@ const std = @import("std");
 
 const Formatter = std.fmt.Formatter;
 
-const TerminalColor = enum {
+pub const TerminalColor = enum {
     red,
     green,
     yellow,
@@ -24,7 +24,7 @@ const TerminalColor = enum {
     }
 };
 
-const TextModifier = enum {
+pub const TextModifier = enum {
     bold,
     italic,
     underline,
@@ -84,8 +84,8 @@ fn fmtAnsi(data: anytype, comptime fmt: []const u8, _: std.fmt.FormatOptions, wr
 pub fn ansiFormatter(
     value: anytype,
     emit_ansi_escape_codes: bool,
-    comptime color: ?TerminalColor,
-    comptime text_mod: ?TextModifier,
+    color: ?TerminalColor,
+    text_mod: ?TextModifier,
 ) Formatter(fmtAnsi) {
     return .{ .data = wrap(value, emit_ansi_escape_codes, color, text_mod) };
 }

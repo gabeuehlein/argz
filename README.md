@@ -1,5 +1,5 @@
-> [!NOTE]
-> `argz` (and this README) are still being rapidly developed. While you can expect to use this library without too much breakage in future versions, don't be surprised by API changes causing your project to stop compiling.
+> [!WARNING]
+> This is the unstable branch. Here, I may push changes that will cause build failures or otherwise breaking changes, and therefore this branch shouldn't be relied on for projects. You probably want the [main branch](https://github.com/gabeuehlein/argz/tree/main) or a [release](https://github.com/gabeuehlein/argz/releases) instead.
 
 ## argz
 

@@ -3,35 +3,44 @@ const util = @import("util.zig");
 const Args = @import("args.zig").Args;
 const argz = @import("argz.zig");
 
+const assert = std.debug.assert;
+
 const Config = argz.Config;
 const Flag = argz.Flag;
 const Command = argz.Command;
 const Positional = argz.Positional;
+const FlagType = util.FlagType;
 
 const Lexer = @This();
 
 args: Args,
 argi: usize = 1,
-subargi: ?usize = null,
+/// The current position in `args.get(argi)`. A value not equal to zero
+/// indicates that we are currently in the middle of lexing a sequence
+/// of short flags.
+subargi: usize = 0,
 found_force_stop: bool = false,
 
-pub const WordMode = union(enum) { positionals, commands: []const Command };
+pub const WordMode = union(enum) {
+    positionals,
+    commands: struct {
+        commands: []const Command,
+        default: ?CommandIndex,
+    },
+};
 
-pub const Span = struct {
-    argv_index: usize,
-    start: usize,
-    end: usize,
+pub const ArgIndex = enum(usize) {
+    _,
 
-    /// Returns a [std.fmt.Formatter] whose `format` method outputs a English numeric
-    /// string pertaining to the `self.argv_index`th number. For example, if `self.argv_index`
-    /// is `3`, then `self.argvIndexFormatter().format(...)` will write `3rd` to the writer.
-    pub fn argvIndexFormatter(self: @This()) std.fmt.Formatter(formatArgvIndex) {
-        return .{ .data = self.argv_index };
+    pub fn get(idx: ArgIndex, args: Args) []const u8 {
+        return args.get(@intFromEnum(idx));
     }
 
-    pub fn len(self: @This()) usize {
-        util.runtimeCheck(self.end >= self.start, "span's endpoint is before its start (start = {d}, end = {d})", .{ self.start, self.end });
-        return self.end - self.start;
+    /// Returns a [std.fmt.Formatter] whose `format` method writes an English
+    /// string pertaining to the `self`th ordinal number. For example, if `@intFromEnum(idx)`
+    /// is `3`, then `idx.formatSuffixed().format(...)` will write `3rd` to the writer.
+    pub fn formatSufixed(idx: ArgIndex) std.fmt.Formatter(formatArgvIndex) {
+        return .{ .data = @intFromEnum(idx) };
     }
 
     fn formatArgvIndex(data: usize, comptime _: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
@@ -50,7 +59,47 @@ pub const Span = struct {
     }
 };
 
-pub const TokenTag = enum { long_flag, long_flag_with_value, short_flag, short_flag_with_value, command, positional, force_stop, err };
+pub const FlagIndex = enum(usize) {
+    _,
+
+    pub fn get(comptime idx: FlagIndex, comptime flags: []const Flag) Flag {
+        return flags[@intFromEnum(idx)];
+    }
+};
+
+pub const CommandIndex = enum(usize) {
+    _,
+
+    pub fn get(comptime idx: CommandIndex, comptime commands: []const Command) Command {
+        return commands[@intFromEnum(idx)];
+    }
+};
+
+pub const Span = struct {
+    argv_index: ArgIndex,
+    start: usize,
+    end: usize,
+
+    pub fn len(span: Span) usize {
+        assert(span.end >= span.start);
+        return span.end - span.start;
+    }
+
+    pub fn getText(span: Span, args: Args) []const u8 {
+        return span.argv_index.get(args)[span.start..span.end];
+    }
+};
+
+pub const TokenTag = enum {
+    long_flag,
+    long_flag_with_value,
+    short_flag,
+    short_flag_with_value,
+    command,
+    positional,
+    force_stop,
+    err,
+};
 
 pub const Token = union(TokenTag) {
     long_flag: Token.Flag,
@@ -62,14 +111,36 @@ pub const Token = union(TokenTag) {
     force_stop,
     err: Error,
 
-    pub const Flag = struct { index: usize };
-    pub const FlagWithValue = struct { index: usize, value_span: Span };
-    pub const Command = struct { index: usize };
-    pub const Positional = struct {
-        span: Span,
+    pub const Flag = struct {
+        index: FlagIndex,
     };
 
-    pub const ErrorTag = enum { unknown_short_flag, unknown_long_flag, unknown_command, missing_value_for_short_flag, missing_value_for_long_flag, expected_value_for_short_flag, expected_value_for_long_flag, unexpected_value_for_short_flag, unexpected_value_for_long_flag, unexpected_force_stop, empty_argument };
+    pub const FlagWithValue = struct {
+        index: FlagIndex,
+        value_span: Span,
+    };
+
+    pub const Command = struct {
+        index: CommandIndex,
+    };
+
+    pub const Positional = struct {
+        argv_index: ArgIndex,
+    };
+
+    pub const ErrorTag = enum {
+        unknown_short_flag,
+        unknown_long_flag,
+        unknown_command,
+        missing_value_for_short_flag,
+        missing_value_for_long_flag,
+        expected_value_for_short_flag,
+        expected_value_for_long_flag,
+        unexpected_value_for_short_flag,
+        unexpected_value_for_long_flag,
+        unexpected_force_stop,
+        empty_argument,
+    };
 
     pub const Error = union(ErrorTag) {
         unknown_short_flag: UnknownFlag,
@@ -89,224 +160,270 @@ pub const Token = union(TokenTag) {
         };
 
         pub const UnknownCommand = struct {
-            span: Span,
+            argv_index: ArgIndex,
         };
 
         pub const MissingValueForFlag = struct {
-            index: usize,
+            index: FlagIndex,
         };
 
-        pub const ExpectedValueForFlag = struct { index: usize };
-        pub const UnexpectedValueForFlag = struct { index: usize, value_span: Span };
-        pub const EmptyArgument = struct { argv_index: usize };
+        pub const ExpectedValueForFlag = struct {
+            index: FlagIndex,
+        };
+
+        pub const UnexpectedValueForFlag = struct {
+            index: FlagIndex,
+            value_span: Span,
+        };
+
+        pub const EmptyArgument = struct {
+            argv_index: ArgIndex,
+        };
+
+        /// Returns a [FlagType] that best fits the cause of the error. If it
+        /// pertains to a short flag (e.g. `.unknown_short_flag`), `.short` will be returned.
+        /// If it pertains to a long flag (e.g. `.missing_value_for_long_flag`), `.long` will be returned.
+        /// Any other variant is assumed to be unreachable.
+        pub fn toFlagType(err: Error) FlagType {
+            return switch (err) {
+                .unknown_short_flag,
+                .missing_value_for_short_flag,
+                .expected_value_for_short_flag,
+                .unexpected_value_for_short_flag,
+                => .short,
+                .unknown_long_flag,
+                .missing_value_for_long_flag,
+                .expected_value_for_long_flag,
+                .unexpected_value_for_long_flag,
+                => .long,
+                else => unreachable,
+            };
+        }
     };
 };
 
 pub fn init(args: Args) !Lexer {
-    const len = args.len;
-    if (len > 1) {
-        for (1..len) |i| {
-            const arg = args.get(i);
-            if (!std.unicode.utf8ValidateSlice(arg))
-                return error.InvalidUtf8;
-        }
+    if (args.len == 0)
+        return error.NoArguments;
+    for (1..args.len) |i| {
+        const arg = args.get(i);
+        if (!std.unicode.utf8ValidateSlice(arg))
+            return error.InvalidUtf8;
     }
-
     return .{ .args = args };
 }
 
 pub fn nextToken(lexer: *Lexer, comptime flags: []const Flag, comptime word_mode: WordMode) ?Token {
     if (lexer.argi >= lexer.args.len)
         return null;
-
-    if (lexer.subargi) |subargi| {
-        if (subargi < lexer.args.get(lexer.argi).len)
-            return lexer.shortChain(flags, lexer.args.get(lexer.argi), subargi)
-        else if (lexer.argi + 1 >= lexer.args.len)
-            return null
-        else
-            lexer.argi += 1;
+    if (lexer.subargi != 0) {
+        if (lexer.subargi == lexer.args.get(lexer.argi).len) {
+            // We already ate the entire short chain, skip to the next argument
+            if (!lexer.loadNextArg())
+                return null;
+        } else {
+            // Handle short chain
+            return lexer.shortFlag(flags, lexer.subargi);
+        }
     }
-
-    const arg = lexer.args.get(lexer.argi);
-    if (lexer.found_force_stop) {
-        defer lexer.argi += 1;
-        return .{ .positional = .{ .span = .{ .argv_index = lexer.argi, .start = 0, .end = arg.len } } };
-    }
-
-    if (arg.len == 0)
-        return .{ .err = .{ .empty_argument = .{ .argv_index = lexer.argi } } };
-
-    switch (arg[0]) {
-        '-' => if (arg.len == 1)
+    const first_arg = lexer.currentArg() orelse return null;
+    if (lexer.maybe('-')) {
+        if (lexer.maybe('-')) {
+            if (lexer.subargi == first_arg.len) {
+                // We found a "--" token; figure out what to do with it
+                _ = lexer.loadNextArg();
+                return switch (word_mode) {
+                    .positionals => .force_stop,
+                    .commands => .{ .err = .unexpected_force_stop },
+                };
+            } else return lexer.longFlag(flags, first_arg);
+        } else if (first_arg.len == 1) {
+            defer lexer.argi += 1;
             return switch (word_mode) {
-                .commands => |cmds| inline for (cmds, 0..) |cmd, i| {
-                    if (std.mem.eql(u8, cmd.cmd, "-")) {
-                        defer lexer.argi += 1;
-                        break .{ .command = .{ .index = i } };
+                .positionals => .{ .positional = .{ .argv_index = @enumFromInt(lexer.argi) } },
+                .commands => |data| inline for (data.commands, 0..) |cmd, i| {
+                    // Inlining the comparison is more efficient than a comptime
+                    // call to std.mem.eql
+                    if (cmd.cmd.len == 1 and cmd.cmd[0] == '-')
+                        break .{ .command = .{ .index = @enumFromInt(i) } };
+                } else if (data.default) |default|
+                    .{ .command = .{ .index = @enumFromInt(default) } }
+                else
+                    .{ .err = .{ .unknown_command = .{ .argv_index = @enumFromInt(lexer.argi) } } },
+            };
+        } else {
+            lexer.subargi = 1;
+            return lexer.shortFlag(flags, lexer.subargi);
+        }
+    } else {
+        // Positional or command
+        defer lexer.argi += 1;
+        return switch (word_mode) {
+            .positionals => if (first_arg.len == 0 and !lexer.found_force_stop)
+                .{ .err = .{ .empty_argument = .{ .argv_index = @enumFromInt(lexer.argi) } } }
+            else
+                .{ .positional = .{ .argv_index = @enumFromInt(lexer.argi) } },
+            .commands => |data| inline for (data.commands, 0..) |cmd, i| {
+                if (std.mem.eql(u8, cmd.cmd, first_arg))
+                    break .{ .command = .{ .index = @enumFromInt(i) } };
+            } else if (data.default) |default|
+                .{ .command = .{ .index = default } }
+            else
+                .{ .err = .{ .unknown_command = .{ .argv_index = @enumFromInt(lexer.argi) } } },
+        };
+    }
+}
+
+fn shortFlag(lexer: *Lexer, comptime flags: []const Flag, subargi: usize) Token {
+    const arg = lexer.currentArg().?;
+    assert(subargi < arg.len);
+
+    const char_len, const char = decodeCharAtArgPos(arg, subargi);
+    lexer.subargi = subargi + char_len;
+
+    inline for (flags, 0..) |flag, i| {
+        if (char == flag.short) {
+            switch (@typeInfo(flag.type)) {
+                .void => return .{ .short_flag = .{
+                    .index = @enumFromInt(i),
+                } },
+                .optional => if (lexer.maybe('=')) {
+                    defer _ = lexer.loadNextArg();
+                    return .{ .short_flag_with_value = .{
+                        .index = @enumFromInt(i),
+                        .value_span = Span{
+                            .argv_index = @enumFromInt(lexer.argi),
+                            .start = subargi + char_len + 1,
+                            .end = arg.len,
+                        },
+                    } };
+                } else {
+                    return .{ .short_flag = .{
+                        .index = @enumFromInt(i),
+                    } };
+                },
+                else => if (subargi + char_len == arg.len) {
+                    if (!lexer.loadNextArg()) {
+                        return .{ .err = .{ .expected_value_for_short_flag = .{
+                            .index = @enumFromInt(i),
+                        } } };
                     }
-                } else .{ .err = .{ .unknown_command = .{ .span = .{ .argv_index = lexer.argi, .start = 0, .end = arg.len } } } },
-                .positionals => blk: {
+                    const next_arg = lexer.currentArg().?;
                     defer lexer.argi += 1;
-                    break :blk .{ .positional = .{ .span = .{ .argv_index = lexer.argi, .start = 0, .end = arg.len } } };
+                    return .{ .short_flag_with_value = .{
+                        .index = @enumFromInt(i),
+                        .value_span = Span{
+                            .argv_index = @enumFromInt(lexer.argi),
+                            .start = 0,
+                            .end = next_arg.len,
+                        },
+                    } };
+                } else {
+                    defer lexer.argi += 1;
+                    return .{ .short_flag_with_value = .{
+                        .index = @enumFromInt(i),
+                        .value_span = Span{
+                            .argv_index = @enumFromInt(lexer.argi),
+                            .start = subargi + char_len,
+                            .end = arg.len,
+                        },
+                    } };
                 },
             }
-        else switch (arg[1]) {
-            '-' => if (arg.len == 2)
-                return switch (word_mode) {
-                    .commands => |cmds| inline for (cmds, 0..) |cmd, i| {
-                        if (std.mem.eql(u8, cmd.cmd, "-")) {
-                            defer lexer.argi += 1;
-                            break .{ .command = .{ .index = i } };
-                        }
-                    } else .{ .err = .{ .unknown_command = .{ .span = .{ .argv_index = lexer.argi, .start = 0, .end = arg.len } } } },
-                    .positionals => blk: {
-                        lexer.found_force_stop = true;
-                        defer lexer.argi += 1;
-                        break :blk .force_stop;
+        }
+    }
+    return .{ .err = .{ .unknown_short_flag = .{ .span = Span{
+        .argv_index = @enumFromInt(lexer.argi),
+        .start = subargi,
+        .end = subargi + char_len,
+    } } } };
+}
+
+fn longFlag(lexer: *Lexer, comptime flags: []const Flag, arg: []const u8) Token {
+    assert(arg.len > 2);
+
+    const flag_end = std.mem.indexOfScalar(u8, arg, '=');
+    const old_index = lexer.argi;
+    var found = false;
+    defer {
+        if (lexer.argi != old_index) // We found a value for a flag but didn't eat it
+            _ = lexer.loadNextArg();
+        if (found) // We found a valid representation for the flag
+            _ = lexer.loadNextArg();
+    }
+
+    inline for (flags, 0..) |flag, i| {
+        if (flag.long) |long| {
+            if (std.mem.eql(u8, long, arg[2 .. flag_end orelse arg.len])) {
+                found = true;
+                switch (@typeInfo(flag.type)) {
+                    .void => return if (flag_end) |eq_idx|
+                        .{ .err = .{ .unexpected_value_for_long_flag = .{
+                            .index = @enumFromInt(i),
+                            .value_span = Span{ .argv_index = @enumFromInt(lexer.argi), .start = eq_idx + 1, .end = arg.len },
+                        } } }
+                    else
+                        .{ .long_flag = .{
+                            .index = @enumFromInt(i),
+                        } },
+                    .optional => return if (flag_end) |eq_idx| .{ .long_flag_with_value = .{
+                        .index = @enumFromInt(i),
+                        .value_span = Span{ .argv_index = @enumFromInt(lexer.argi), .start = eq_idx + 1, .end = arg.len },
+                    } } else .{ .long_flag = .{
+                        .index = @enumFromInt(i),
+                    } },
+                    else => return if (flag_end) |eq_idx| .{ .long_flag_with_value = .{
+                        .index = @enumFromInt(i),
+                        .value_span = Span{
+                            .argv_index = @enumFromInt(lexer.argi),
+                            .start = eq_idx + 1,
+                            .end = arg.len,
+                        },
+                    } } else blk: {
+                        if (!lexer.loadNextArg())
+                            break :blk .{ .err = .{ .expected_value_for_long_flag = .{ .index = @enumFromInt(i) } } };
+                        const next_arg = lexer.currentArg().?;
+                        break :blk .{ .long_flag_with_value = .{ .index = @enumFromInt(i), .value_span = Span{ .argv_index = @enumFromInt(lexer.argi), .start = 0, .end = next_arg.len } } };
                     },
                 }
-            else
-                return lexer.longFlag(flags, arg),
-            else => return lexer.shortFlag(flags, arg),
-        },
-        else => return switch (word_mode) {
-            .commands => |cmds| inline for (cmds, 0..) |cmd, i| {
-                if (std.mem.eql(u8, cmd.cmd, arg)) {
-                    defer lexer.argi += 1;
-                    break .{ .command = .{ .index = i } };
-                }
-            } else .{ .err = .{ .unknown_command = .{ .span = .{ .argv_index = lexer.argi, .start = 0, .end = arg.len } } } },
-            .positionals => blk: {
-                defer lexer.argi += 1;
-                break :blk .{ .positional = .{ .span = .{ .argv_index = lexer.argi, .start = 0, .end = arg.len } } };
-            },
-        },
+            }
+        }
     }
+    return .{ .err = .{ .unknown_long_flag = .{ .span = Span{
+        .argv_index = @enumFromInt(lexer.argi),
+        .start = 2,
+        .end = flag_end orelse arg.len,
+    } } } };
 }
 
-pub fn longFlag(lexer: *Lexer, comptime flags: []const Flag, arg: []const u8) Token {
-    const eq_index = std.mem.indexOfScalar(u8, arg, '=');
-    const flag_end = eq_index orelse arg.len;
-    return inline for (flags, 0..) |flag, i| {
-        const long = flag.long orelse continue;
-        if (std.mem.eql(u8, long, arg[2..flag_end])) {
-            if (flag.type == void or flag.type == argz.FlagHelp) {
-                if (eq_index) |idx|
-                    break .{ .err = .{ .unexpected_value_for_long_flag = .{ .index = i, .value_span = .{ .argv_index = lexer.argi, .start = idx + 1, .end = arg.len } } } };
-                lexer.argi += 1;
-                break .{ .long_flag = .{ .index = i } };
-            } else if (@typeInfo(flag.type) == .optional) {
-                if (eq_index) |idx| {
-                    if (idx + 1 == arg.len)
-                        break .{ .err = .{ .missing_value_for_long_flag = .{ .index = i } } };
-                    defer lexer.argi += 1;
-                    break .{ .long_flag_with_value = .{ .index = i, .value_span = .{ .argv_index = lexer.argi, .start = idx + 1, .end = arg.len } } };
-                }
-                defer lexer.argi += 1;
-                break .{ .long_flag = .{ .index = i } };
-            } else {
-                if (eq_index) |idx| {
-                    if (idx + 1 == arg.len)
-                        break .{ .err = .{ .missing_value_for_long_flag = .{ .index = i } } };
-                    defer lexer.argi += 1;
-                    break .{ .long_flag_with_value = .{ .index = i, .value_span = .{ .argv_index = lexer.argi, .start = idx + 1, .end = arg.len } } };
-                } else {
-                    if (lexer.argi + 1 == lexer.args.len) {
-                        break .{ .err = .{ .expected_value_for_long_flag = .{ .index = i } } };
-                    } else {
-                        defer lexer.argi += 2;
-                        break .{ .long_flag_with_value = .{ .index = i, .value_span = .{ .argv_index = lexer.argi + 1, .start = 0, .end = lexer.args.get(lexer.argi + 1).len } } };
-                    }
-                }
-            }
-        }
-    } else .{ .err = .{ .unknown_long_flag = .{ .span = .{ .argv_index = lexer.argi, .start = 2, .end = flag_end } } } };
+fn loadNextArg(lexer: *Lexer) bool {
+    if (lexer.argi < lexer.args.len) {
+        lexer.argi += 1;
+        lexer.subargi = 0;
+        return true;
+    }
+    return false;
 }
 
-pub fn shortFlag(lexer: *Lexer, comptime flags: []const Flag, arg: []const u8) Token {
-    const char_len, const char = decodeCharAtArgPos(arg, 1);
-    return inline for (flags, 0..) |flag, i| {
-        if (flag.short == char) {
-            if (flag.type == void or flag.type == argz.FlagHelp) {
-                lexer.subargi = char_len + 1;
-                break .{ .short_flag = .{ .index = i } };
-            } else if (@typeInfo(flag.type) == .optional) {
-                if (char_len + 1 < arg.len and arg[char_len + 1] == '=') {
-                    if (char_len + 2 == arg.len) {
-                        break .{ .err = Token.Error{ .missing_value_for_short_flag = .{ .index = i } } };
-                    }
-                    defer lexer.argi += 1;
-                    break .{ .short_flag_with_value = Token.FlagWithValue{ .index = i, .value_span = .{ .argv_index = lexer.argi, .start = char_len + 1, .end = arg.len } } };
-                } else {
-                    defer lexer.subargi = char_len + 1;
-                    break .{ .short_flag = Token.Flag{ .index = i } };
-                }
-            } else {
-                if (char_len + 1 == arg.len) {
-                    break if (lexer.argi + 1 == lexer.args.len)
-                        .{ .err = .{ .expected_value_for_short_flag = .{
-                            .index = i,
-                        } } }
-                    else blk: {
-                        lexer.argi += 2;
-                        lexer.subargi = null;
-                        break :blk .{ .short_flag_with_value = .{ .index = i, .value_span = .{ .argv_index = lexer.argi - 1, .start = 0, .end = lexer.args.get(lexer.argi - 1).len } } };
-                    };
-                } else {
-                    defer {
-                        lexer.argi += 1;
-                        lexer.subargi = null;
-                    }
-                    break .{ .short_flag_with_value = .{ .index = i, .value_span = .{ .argv_index = lexer.argi, .start = char_len + 1, .end = arg.len } } };
-                }
-            }
-        }
-    } else .{ .err = .{ .unknown_short_flag = .{ .span = .{ .argv_index = lexer.argi, .start = 1, .end = char_len } } } };
+fn peek(lexer: *const Lexer) ?u21 {
+    return if (lexer.argi >= lexer.args.len or lexer.subargi >= lexer.args.get(lexer.argi).len)
+        null
+    else
+        decodeCharAtArgPos(lexer.args.get(lexer.argi), lexer.subargi)[1];
 }
 
-pub fn shortChain(lexer: *Lexer, comptime flags: []const Flag, arg: []const u8, subargi: usize) Token {
-    const char_len, const char = decodeCharAtArgPos(arg, subargi);
-    return inline for (flags, 0..) |flag, i| {
-        if (flag.short == char) {
-            if (flag.type == void or flag.type == argz.FlagHelp) {
-                lexer.subargi = subargi + char_len + 1;
-                break .{ .short_flag = .{ .index = i } };
-            } else if (@typeInfo(flag.type) == .optional) {
-                if (subargi + char_len + 1 < arg.len and arg[subargi + char_len + 1] == '=') {
-                    if (subargi + char_len + 2 == arg.len) {
-                        break .{ .err = Token.Error{ .missing_value_for_short_flag = .{ .index = i } } };
-                    }
-                    defer {
-                        lexer.argi += 1;
-                        lexer.subargi = null;
-                    }
-                    break .{ .short_flag_with_value = Token.FlagWithValue{ .index = i, .value_span = .{ .argv_index = lexer.argi, .start = subargi + char_len + 1, .end = arg.len } } };
-                } else {
-                    defer lexer.subargi = subargi + char_len + 1;
-                    break .{ .short_flag = Token.Flag{ .index = i } };
-                }
-            } else {
-                if (subargi + char_len == arg.len) {
-                    break if (lexer.argi + 1 == lexer.args.len)
-                        .{ .err = .{ .expected_value_for_short_flag = .{
-                            .index = i,
-                        } } }
-                    else blk: {
-                        lexer.argi += 2;
-                        lexer.subargi = null;
-                        break :blk .{ .short_flag_with_value = .{ .index = i, .value_span = .{ .argv_index = lexer.argi - 1, .start = 0, .end = lexer.args.get(lexer.argi).len } } };
-                    };
-                } else {
-                    defer {
-                        lexer.argi += 1;
-                        lexer.subargi = null;
-                    }
-                    break .{ .short_flag_with_value = .{ .index = i, .value_span = .{ .argv_index = lexer.argi, .start = subargi + char_len, .end = arg.len } } };
-                }
-            }
-        }
-    } else .{ .err = .{ .unknown_short_flag = .{ .span = .{ .argv_index = lexer.argi, .start = subargi, .end = subargi + char_len } } } };
+fn maybe(lexer: *Lexer, char: u21) bool {
+    const arg = lexer.currentArg() orelse return false;
+
+    const char_len, const next_char = decodeCharAtArgPos(arg, lexer.subargi);
+    if (next_char == char) {
+        lexer.subargi += char_len;
+        return true;
+    } else return false;
+}
+
+fn currentArg(lexer: *const Lexer) ?[]const u8 {
+    return if (lexer.argi < lexer.args.len) lexer.args.get(lexer.argi) else null;
 }
 
 fn decodeCharAtArgPos(arg: []const u8, pos: usize) struct { u3, u21 } {
@@ -320,40 +437,29 @@ fn decodeCharAtArgPos(arg: []const u8, pos: usize) struct { u3, u21 } {
     } };
 }
 
+comptime {
+    std.testing.refAllDeclsRecursive(Lexer);
+}
+
 test Lexer {
-    const builtin = @import("builtin");
-    if (!builtin.link_libc) {
-        switch (builtin.os.tag) {
-            .windows, .wasi => return error.SkipZigTest,
-            else => {},
-        }
-    }
-    const flags = &[_]Flag{
-        .{ .long = "flag1", .type = void },
-        .{ .long = "flag2", .type = []const u8 },
-        .{ .short = 's', .type = ?u8 },
-        .{ .short = 'a', .type = void },
-        .{ .short = 'h', .type = ?u16 },
-    };
     const argv: []const [:0]const u8 = &.{
-        "\xff\x21not valid UTF8\x12\xff",
-        "--flag1",
-        "--flag2=bar",
-        "-ash=123",
-        "--flag2",
-        "quux",
-        "positional0",
-        "positional1",
-        "--",
-        "",
-        "the previous argument was empty",
-        "--actuallyapositional",
-        "-thistoo",
+        "program",
+        "--bar=foo",
+        "-qwerty=99",
     };
-    var sys_args = @import("args.zig").OwnedArgs.init(argv);
+    var sys_args = argz.OwnedArgs.init(argv);
     const args = sys_args.args();
     var lexer = try Lexer.init(args);
+    const flags = &[_]Flag{
+        .{ .short = null, .long = "bar", .type = u32 },
+        .{ .short = 'q', .long = null },
+        .{ .short = 'w', .long = null },
+        .{ .short = 'e', .long = null },
+        .{ .short = 'r', .long = null },
+        .{ .short = 't', .long = null },
+        .{ .short = 'y', .long = null, .type = ?u32 },
+    };
     while (lexer.nextToken(flags, .positionals)) |tok| {
-        std.log.err("{any}\n", .{tok});
+        std.log.err("{any}", .{tok});
     }
 }
