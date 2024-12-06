@@ -18,33 +18,47 @@ const Args = @import("args.zig").Args;
 
 const Type = std.builtin.Type;
 
-/// Returns a length-zero slice to be used as a dummy when creating `ArrayListUnmanaged` instances.
-fn nullSlice(comptime T: type) []T {
-    var s = @as([0]T, undefined);
-    return &s;
-}
-
-
-pub fn ResolveInnermostType(comptime T: type) type {
+/// Doesn't check the validity of the type beforehand.
+pub fn ResolveType(comptime T: type) type {
     assert(@inComptime());
 
-    var listlike_parent = false;
-    
-    comptime return if (util.isBoundedMulti(T))
-        ResolveInnermostType(@as(T, .{}).__argz_bmulti_backing_type)
-    else if (util.isDynamicMulti(T))
-        ResolveType(@as(T, .{}).__argz_dmulti_backing_type)
-    else if (util.isCounter(T))
-        @as(T, .{}).__argz_counter_type
-    else if (T == void)
-        bool
-    else if (util.isPair(T)) blk: {
-        const v = @as(T, .{}).__argz_pair_result;
-        break :blk struct { v[0], v[1] };
-    } else T;
+    const argzType = util.ArgzType.fromZigType;
+
+    comptime return switch (argzType(T)) {
+        .pair => |p| struct { p.lhs_type, p.rhs_type },
+        .multi => |m| ResolveType(m.child),
+        .counter => @compileError("internal argz error: type '" ++ @typeName(T) ++ "' shouldn't have been resolved"),
+        .zig_primitive => |ty| ty,
+        .trailing => []const []const u8,
+        .flag_help => void,
+    };
 }
 
-fn TypeFromFlags(comptime flags: []const Flag) type {
+fn validateFlags(comptime flags: []const Flag, comptime support_allocation: bool) void {
+    assert(@inComptime());
+    const argzType = util.ArgzType.fromZigType;
+
+    inline for (0.., flags) |i, flag| {
+        inline for (0.., flags) |j, other_flag| {
+            if (i == j) continue;
+            if (flag.short != null and flag.short == other_flag.short)
+                @compileError(std.fmt.comptimePrint("flag at index {d} has the same short representation as the flag at index {d} ('{u}')", .{ i, j, flag.short.? }));
+            if (flag.long) |long|
+                if (other_flag.long) |other_long|
+                    if (std.mem.eql(u8, long, other_long))
+                        @compileError(std.fmt.comptimePrint("flag at index {d} has the same long representation as the flag at index {d} ('{s}')", .{ i, j, long }));
+        }
+        util.validateType(flag.type, .flag);
+        const info = argzType(flag.type);
+        if (!support_allocation and info.requiresAllocator())
+            @compileError("flag type '" ++ @typeName(flag.type) ++ "' is not supported without an allocator");
+    }
+}
+
+fn TypeFromFlags(comptime flags: []const Flag, comptime support_allocation: bool) type {
+    assert(@inComptime());
+
+    validateFlags(flags, support_allocation);
     comptime var fields = @as([flags.len]Type.StructField, undefined);
     inline for (0.., flags) |i, flag| {
         const FlagType = ResolveType(flag.type);
@@ -59,7 +73,9 @@ fn TypeFromFlags(comptime flags: []const Flag) type {
     return @Type(.{ .@"struct" = .{ .fields = &fields, .layout = .auto, .decls = &.{}, .is_tuple = false } });
 }
 
-fn TypeFromMode(comptime mode: Mode) type {
+fn TypeFromMode(comptime mode: Mode, comptime support_allocation: bool) type {
+    assert(@inComptime());
+
     comptime return switch (mode) {
         .commands => |commands| {
             var enum_fields = @as([commands.len]Type.EnumField, undefined);
@@ -71,8 +87,8 @@ fn TypeFromMode(comptime mode: Mode) type {
                     .value = i,
                 };
                 union_fields[i] = Type.UnionField{ .name = cmd.fieldName(), .type = switch (cmd.mode) {
-                    .standard => struct { positionals: TypeFromMode(cmd.mode), flags: TypeFromFlags(cmd.flags) },
-                    .commands => struct { command: TypeFromMode(cmd.mode), flags: TypeFromFlags(cmd.flags) },
+                    .standard => struct { positionals: TypeFromMode(cmd.mode, support_allocation), flags: TypeFromFlags(cmd.flags, support_allocation) },
+                    .commands => struct { command: TypeFromMode(cmd.mode, support_allocation), flags: TypeFromFlags(cmd.flags, support_allocation) },
                 }, .alignment = 0 };
             }
 
@@ -82,16 +98,48 @@ fn TypeFromMode(comptime mode: Mode) type {
                 .is_exhaustive = true,
                 .decls = &.{},
             } });
-            return @Type(.{ .@"union" = .{ .fields = &union_fields, .layout = .auto, .tag_type = EnumType, .decls = &.{} } });
+            return @Type(.{ .@"union" = .{
+                .fields = &union_fields,
+                .layout = .auto,
+                .tag_type = EnumType,
+                .decls = &.{},
+            } });
         },
         .standard => |positionals| {
             var struct_fields = @as([positionals.len]Type.StructField, undefined);
-
-            for (0.., positionals) |i, pos| {
-                struct_fields[i] = Type.StructField{ .name = pos.fieldName(), .type = ResolveType(pos.type), .default_value = null, .is_comptime = false, .alignment = 0 };
+            if (positionals.len != 0) {
+                const last = positionals[positionals.len - 1];
+                const last_info = util.ArgzType.fromZigType(last.type);
+                if (!support_allocation and last_info.requiresAllocator())
+                    @compileError("final positional argument type '" ++ @typeName(last.type) ++ "' requires an allocator to parse");
             }
 
-            return @Type(.{ .@"struct" = .{ .fields = &struct_fields, .layout = .auto, .decls = &.{}, .is_tuple = false } });
+            var found_optional = false;
+
+            for (0.., positionals) |i, positional| {
+                if (i != positionals.len and util.ArgzType.fromZigType(positional.type).requiresAllocator())
+                    @compileError("positional argument type '" ++ @typeName(positional.type) ++ "' requires an allocator to parse");
+                if (@typeInfo(positional.type) == .optional) {
+                    if (!found_optional)
+                        found_optional = true;
+                } else if (found_optional and positional.type != root.Trailing)
+                    @compileError("optional positionals must be at the end of a positional list");
+                util.validateType(positional.type, .positional);
+                struct_fields[i] = Type.StructField{
+                    .name = positional.fieldName(),
+                    .type = ResolveType(positional.type),
+                    .default_value = null,
+                    .is_comptime = false,
+                    .alignment = 0,
+                };
+            }
+
+            return @Type(.{ .@"struct" = .{
+                .fields = &struct_fields,
+                .layout = .auto,
+                .decls = &.{},
+                .is_tuple = false,
+            } });
         },
     };
 }
@@ -112,16 +160,16 @@ fn ArgParser(comptime cfg: root.Config) type {
 
         const FlagType = util.FlagType;
 
-        fn parseValue(self: *const @This(), comptime T: type, string: []const u8) !ResolveType(T) {
+        fn parseValue(self: *const Self, comptime T: type, string: []const u8) !ResolveType(T) {
+            const R = ResolveType(T);
             if (cfg.support_allocation)
-                return try values.parseDynamicValue(T, self.allocator, string, false)
+                return try values.parseDynamicValue(R, self.allocator, string)
             else
-                return try values.parseStaticValue(T, string);
+                return try values.parseStaticValue(R, string);
         }
 
-        // zig fmt: off
         fn handleFlag(
-            self: *@This(),
+            self: *Self,
             comptime flags: []const Flag,
             comptime index: usize,
             comptime command_stack: []const Command,
@@ -129,68 +177,61 @@ fn ArgParser(comptime cfg: root.Config) type {
             comptime mode: Mode,
             val: ?[]const u8,
             flag_data: *TypeFromFlags(flags),
-            flags_set: *std.StaticBitSet(flags.len)
+            flags_set: *std.StaticBitSet(flags.len),
         ) !void {
-            // zig fmt: on
             const flag = flags[index];
-            if (comptime util.isCounter(flag.type)) {
-                if (val != null) return self.fail("wasn't expecting value '{s}' for flag '{s}'", .{ val.?, flag.flagString(variant) });
-                if (!flags_set.isSet(index)) {
-                    @field(flag_data, flag.fieldName()) = 0;
-                    flags_set.set(index);
+            switch (util.ArgzType.fromZigType(flag.type)) {
+                .counter => if (val) |v| {
+                    return self.fail("wasn't expecting value '{s}' for flag '{s}'", .{ v, flag.flagString(variant) });
                 } else {
                     @field(flag_data, flag.fieldName()) +|= 1;
-                }
-                return;
-            } else if (comptime flag.type == root.FlagHelp) {
-                var stdout = std.io.getStdOut();
-                const stdoutw = stdout.writer();
-                try self.writeHelpFull(stdoutw, self.stdout_supports_ansi, flags, command_stack, mode);
-                std.process.exit(0); // TODO maybe free memory/run destructors before doing this?
-                return;
-            } else if (flags_set.isSet(index) and comptime !(util.isBoundedMulti(flag.type) or util.isDynamicMulti(flag.type))) {
-                return self.fail("flag '{s}' was found multiple times", .{flag.flagString(variant)});
-            }
-
-            if (comptime util.isBoundedMulti(flag.type)) {
-                const Child = @as(flag.type, .{}).__argz_bmulti_child;
-                if (val) |v|
-                    try @field(flag_data, flag.fieldName()).append(try self.parseValue(Child, v))
-                else
-                    return self.fail("expected value for flag '{s}'", .{flag.flagString(variant)});
-                flags_set.set(index);
-                return;
-            } else if (comptime util.isDynamicMulti(flag.type)) {
-                const Child = @as(flag.type, .{}).__argz_dmulti_child;
-                if (val) |v|
-                    try @field(flag_data, flag.fieldName()).append(self.allocator, try self.parseValue(Child, v))
-                else
-                    return self.fail("expected value for flag '{s}'", .{flag.flagString(variant)});
-                flags_set.set(index);
-                return;
-            } else if (flag.type == void) {
-                if (val != null) return self.fail("wasn't expecting value '{s}' for flag '{s}'", .{ val.?, flag.flagString(variant) });
-                @field(flag_data, flag.fieldName()) = true;
-                flags_set.set(index);
-                return;
-            } else if (comptime util.isPair(flag.type)) {
-                if (val) |v| {
-                    @field(flag_data, flag.fieldName()) = try self.parseValue(flag.type, v);
                     flags_set.set(index);
-                    return;
-                } else {
-                    return self.fail("expected value for flag '{s}'", .{flag.flagString(variant)});
-                }
-            } else if (@typeInfo(flag.type) == .optional) {
-                @field(flag_data, flag.fieldName()) = if (val) |v| try self.parseValue(flag.type, v) else null;
-                flags_set.set(index);
-                return;
-            } else if (val == null) {
-                return self.fail("was expecting a value of type '{s}' for flag '{s}'", .{ flag.typeString(false), flag.flagString(variant) });
-            } else {
-                @field(flag_data, flag.fieldName()) = try self.parseValue(flag.type, val.?);
-                flags_set.set(index);
-                return;
+                },
+                .pair => {
+                    const v = val orelse return self.fail("expected value for flag '{s}'", .{flag.flagString(variant)});
+                    @field(flag_data, flag.fieldName()) = try self.parseValue(flag.type, v);
+                },
+                .multi => |m| {
+                    if (@typeInfo(m.child) == .optional) {
+                        if (val) |v| {
+                            try @field(flag_data, flag.fieldName()).append(try self.parseValue(@typeInfo(m.child).optional.child, v));
+                        } else {
+                            try @field(flag_data, flag.fieldName()).append(null);
+                        }
+                    } else {
+                        const v = val orelse return self.fail("expected value for flag '{s}'", .{flag.flagString(variant)});
+                        try @field(flag_data, flag.fieldName()).append(try self.parseValue(m.child, v));
+                    }
+                },
+                .zig_primitive => |prim| {
+                    if (flags_set.isSet(index))
+                        return self.fail("flag '{s}' found multiple times", .{flag.flagString(variant)});
+                    if (prim == void) {
+                        if (val) |v|
+                            return self.fail("unexpected value '{s}' found for flag '{s}'", .{ v, flag.flagString(variant) });
+                        @field(flag_data, flag.fieldName()) = true;
+                    } else if (@typeInfo(prim) == .optional) {
+                        if (val) |v| {
+                            @field(flag_data, flag.fieldName()) = try self.parseValue(@typeInfo(prim).optional.child, v);
+                        } else {
+                            @field(flag_data, flag.fieldName()) = null;
+                        }
+                    } else {
+                        const v = val orelse return self.fail("expected value for flag '{s}'", .{flag.flagString(variant)});
+                        try @field(flag_data, flag.fieldName()).append(try self.parseValue(prim, v));
+                    }
+                },
+                .flag_help => {
+                    if (val) |v| {
+                        _ = v;
+                        @panic("TODO: handle --help=(flag|cmd|pos):[data]");
+                    }
+                    var stdout = std.io.getStdOut();
+                    const w = stdout.writer();
+                    try self.writeHelpFull(w, self.stdout_supports_ansi, flags, command_stack, mode);
+                    std.process.exit(0);
+                },
+                .trailing => unreachable,
             }
         }
 
@@ -238,7 +279,13 @@ fn ArgParser(comptime cfg: root.Config) type {
 
         /// Prints a message depending on the `ParseError` provided, and returns `error.ArgParseError`
         fn handleInternalError(self: *const @This(), comptime flag_data: ?struct { Flag, FlagType }, comptime positional: ?root.Positional, val: ?[]const u8, err: ParseError) ParseError {
-            const args2 = if (flag_data) |data| .{ "flag", data[0].flagString(data[1]) } else .{ "positional", positional.?.display };
+            const args2 = if (flag_data) |data| .{
+                "flag",
+                data[0].flagString(data[1]),
+            } else .{
+                "positional",
+                positional.?.display,
+            };
             const args3 = if (flag_data) |data| .{
                 val orelse "",
                 "flag",

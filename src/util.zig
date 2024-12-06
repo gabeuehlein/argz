@@ -1,4 +1,3 @@
-const root = @import("argz.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const argz = @import("argz.zig");
@@ -7,12 +6,6 @@ const assert = std.debug.assert;
 pub const ParseValueError = error{ IntegerOverflow, NotEnoughArguments, TooManyArguments, InvalidBool, InvalidEnumField } || std.fmt.ParseIntError || std.fmt.ParseFloatError;
 
 pub const FlagType = enum { long, short };
-
-pub const OptionType = enum {
-    flag,
-    pair,
-    positional,
-};
 
 const bool_table = std.StaticStringMap(bool).initComptime(.{ .{ "true", true }, .{ "false", false } });
 
@@ -78,14 +71,16 @@ pub const ArgzType = union(enum) {
     }
 };
 
+pub const ValidationPurpose = enum {
+    flag,
+    pair_in_flag,
+    positional,
+    positional_in_flag,
+};
+
 pub fn validateType(
     comptime T: type,
-    comptime purpose: enum {
-        flag,
-        pair_in_flag,
-        positional,
-        positional_in_flag,
-    },
+    comptime purpose: ValidationPurpose,
     comptime listlike_parent: bool,
     comptime pair_lhs: bool,
     comptime support_allocation: bool,
@@ -129,7 +124,9 @@ pub fn validateType(
             }
         },
         .zig_primitive => |prim| switch (@typeInfo(prim)) {
-            .pointer => |ptr| if (!support_allocation and (!(ptr.child == u8 and ptr.is_const) and ptr.sentinel != null))
+            .pointer => |ptr| if (ptr.size != .Slice)
+                @compileError("pointer type must be '.Slice'")
+            else if (!support_allocation and (!(ptr.child == u8 and ptr.is_const) and ptr.sentinel != null))
                 @compileError("type '" ++ @typeName(T) ++ "' is not supported without an allocator")
             else if (listlike_parent and !(ptr.child == u8 and ptr.is_const))
                 @compileError("type '" ++ @typeName(T) ++ "' cannot be the child of a list-like type"),
@@ -160,30 +157,29 @@ pub fn validateType(
 }
 
 pub fn isCounter(comptime T: type) bool {
-    if (@typeInfo(T) == .@"struct") {
-        return if (@hasField(T, "__argz_counter_type"))
-            switch (@typeInfo(@as(T, .{}).__argz_counter_type)) {
-                .int => |int| int.bits != 0,
-                else => false,
-            }
-        else
-            false;
-    } else return false;
+    return @typeInfo(T) == .@"struct" and @hasField(T, "__argz_counter_type") and argz.Counter(@as(T, .{}).__argz_counter_type) == T;
 }
 
 pub fn isBoundedMulti(comptime T: type) bool {
-    return @typeInfo(T) == .@"struct" and @hasField(T, "__argz_bmulti_child") and @TypeOf(@as(T, .{}).__argz_bmulti_child) == type and @hasField(T, "__argz_bmulti_len");
+    return @typeInfo(T) == .@"struct" and @hasField(T, "__argz_bmulti_child") and @hasField(T, "__argz_bmulti_len") and blk: {
+        const init = @as(T, .{});
+        break :blk argz.BoundedMulti(init.__argz_bmulti_child, init.__argz_bmulti_len) == T;
+    };
 }
 
 pub fn isDynamicMulti(comptime T: type) bool {
     if (!(@typeInfo(T) == .@"struct" and @hasField(T, "__argz_dmulti_child") and @hasField(T, "__argz_dmulti_backing_type"))) {
         return false;
     } else {
-        const Child = @as(T, .{}).__argz_dmulti_child;
-        return @TypeOf(Child) == type;
+        const init = @as(T, .{});
+        return argz.DynamicMulti(init.__argz_dmulti_child) == T;
     }
 }
 
 pub fn isPair(comptime T: type) bool {
-    return @typeInfo(T) == .@"struct" and @hasField(T, "__argz_pair_tag") and @hasField(T, "__argz_pair_result") and @hasField(T, "__argz_pair_separator");
+    return @typeInfo(T) == .@"struct" and @hasField(T, "__argz_pair_tag") and @hasField(T, "__argz_pair_result") and @hasField(T, "__argz_pair_separator") and blk: {
+        const init = @as(T, .{});
+        const P = init.__argz_pair_result;
+        break :blk argz.Pair(P[0], P[1], init.__argz_pair_separator) == T;
+    };
 }
