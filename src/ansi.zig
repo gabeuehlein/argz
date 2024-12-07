@@ -64,28 +64,28 @@ pub fn Wrapper(comptime T: type) type {
     };
 }
 
-/// Requires that `@TypeOf(data) == Wrapper(T)` or `@TypeOf(data)` is a superset of `Wrapper(T)` for any `T`.
-fn fmtAnsi(data: anytype, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-    if (data.use_ansi) {
-        if (data.color) |col|
-            try writer.print("\x1b[38;5;{d}m", .{col.getForegroundCode()});
-        if (data.text_mod) |mod|
-            try writer.print("\x1b[{d}m", .{mod.getAnsiSetCode()});
-    }
-    try std.fmt.format(writer, fmt, .{data.data});
-    if (data.use_ansi) {
-        if (data.text_mod) |mod|
-            try writer.print("\x1b[{d}m", .{mod.getAnsiClearCode()});
-        if (data.color != null)
-            try writer.writeAll("\x1b[39;5;0m");
-    }
-}
-
 pub fn ansiFormatter(
     value: anytype,
-    emit_ansi_escape_codes: bool,
-    color: ?TerminalColor,
-    text_mod: ?TextModifier,
-) Formatter(fmtAnsi) {
-    return .{ .data = wrap(value, emit_ansi_escape_codes, color, text_mod) };
+    _emit_ansi_escape_codes: bool,
+    _color: ?TerminalColor,
+    _text_mod: ?TextModifier,
+) Formatter(struct {
+    fn func(data: Wrapper(@TypeOf(value)), comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        if (data.use_ansi) {
+            if (data.color) |col|
+                try writer.print("\x1b[38;5;{d}m", .{col.getForegroundCode()});
+            if (data.text_mod) |mod|
+                try writer.print("\x1b[{d}m", .{mod.getAnsiSetCode()});
+        }
+        // TODO: is there a better way of doing this?
+        try std.fmt.format(writer, "{" ++ fmt ++ "}", .{data.data});
+        if (data.use_ansi) {
+            if (data.text_mod) |mod|
+                try writer.print("\x1b[{d}m", .{mod.getAnsiClearCode()});
+            if (data.color != null)
+                try writer.writeAll("\x1b[39;5;0m");
+        }
+    }
+}.func) {
+    return .{ .data = wrap(value, _emit_ansi_escape_codes, _color, _text_mod) };
 }

@@ -252,8 +252,7 @@ pub fn nextToken(lexer: *Lexer, comptime flags: []const Flag, comptime word_mode
                     .{ .err = .{ .unknown_command = .{ .argv_index = @enumFromInt(lexer.argi) } } },
             };
         } else {
-            lexer.subargi = 1;
-            return lexer.shortFlag(flags, lexer.subargi);
+            return lexer.shortFlag(flags, 1);
         }
     } else {
         // Positional or command
@@ -341,14 +340,16 @@ fn shortFlag(lexer: *Lexer, comptime flags: []const Flag, subargi: usize) Token 
 
 fn longFlag(lexer: *Lexer, comptime flags: []const Flag, arg: []const u8) Token {
     assert(arg.len > 2);
+    assert(lexer.subargi == 2);
+    lexer.subargi = 0;
 
     const flag_end = std.mem.indexOfScalar(u8, arg, '=');
-    const old_index = lexer.argi;
+    const old_argi = lexer.argi;
     var found = false;
     defer {
-        if (lexer.argi != old_index) // We found a value for a flag but didn't eat it
+        if (found)
             _ = lexer.loadNextArg();
-        if (found) // We found a valid representation for the flag
+        if (old_argi != lexer.argi)
             _ = lexer.loadNextArg();
     }
 
@@ -356,6 +357,13 @@ fn longFlag(lexer: *Lexer, comptime flags: []const Flag, arg: []const u8) Token 
         if (flag.long) |long| {
             if (std.mem.eql(u8, long, arg[2 .. flag_end orelse arg.len])) {
                 found = true;
+                if (flag.type == argz.FlagHelp)
+                    return if (flag_end) |eq_idx| .{ .long_flag_with_value = .{
+                        .index = @enumFromInt(i),
+                        .value_span = Span{ .argv_index = @enumFromInt(lexer.argi), .start = eq_idx + 1, .end = arg.len },
+                    } } else .{ .long_flag = .{
+                        .index = @enumFromInt(i),
+                    } };
                 switch (@typeInfo(flag.type)) {
                     .void => return if (flag_end) |eq_idx|
                         .{ .err = .{ .unexpected_value_for_long_flag = .{

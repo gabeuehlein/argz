@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const util = @import("util.zig");
 pub const Lexer = @import("Lexer.zig");
 const args = @import("args.zig");
+pub const fmt = @import("format.zig");
 
 const testing = std.testing;
 
@@ -50,11 +51,17 @@ pub const Config = struct {
     /// The top-level [Mode](argz.Mode) for the CLI. This determines whether a project
     /// is command-based or flag-based.
     mode: Mode,
-    /// Whether to support dynamic memory allocation. If `true`, variable length slices become
-    /// legal as option types. It is the programmer's responsibility to free them when no longer needed.
+    /// Whether to support dynamic memory allocation. If `true`, variable length slices and sentinel-terminated
+    /// strings become legal as option types. It is the programmer's responsibility to free them when no longer needed.
     ///
-    /// Note that slices are to be passed as comma-separated strings containing the data
+    /// Note that slices are to be passed as comma-separated strings containing the data to be parsed. There is currently
+    /// no way to escape commas in slices of strings. Each application must implement their own way of doing so themselves.
     support_allocation: bool,
+    formatters: struct {
+        flags: fmt.AllFlagsFormatFn = fmt.formatAllFlagsDefault,
+        commands: fmt.AllCommandsFormatFn = fmt.formatAllCommandsDefault,
+        prologue: fmt.PrologueFormatFn = fmt.formatPrologueDefault,
+    } = .{},
 };
 
 pub const Command = struct {

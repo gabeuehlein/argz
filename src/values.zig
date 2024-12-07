@@ -111,7 +111,7 @@ pub fn parseDynamicValue(comptime T: type, allocator: std.mem.Allocator, string:
             }
         },
         .zig_primitive => |prim| switch (@typeInfo(prim)) {
-            .int, .float, bool => result = try parseStaticValue(prim, string),
+            .int, .float, .bool => result = try parseStaticValue(prim, string),
             .array => |arr| {
                 var split = std.mem.splitScalar(u8, string, ',');
                 var i: usize = 0;
@@ -152,6 +152,7 @@ pub fn parseDynamicValue(comptime T: type, allocator: std.mem.Allocator, string:
                     }
                 }
             },
+            else => unreachable,
         },
         inline else => comptime unreachable,
     }

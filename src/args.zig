@@ -1,3 +1,4 @@
+const std = @import("std");
 const builtin = @import("builtin");
 const util = @import("util.zig");
 const Span = @import("Lexer.zig").Span;
@@ -12,8 +13,8 @@ pub const Args = struct {
     }
 
     pub fn getSpanText(args: Args, span: Span) []const u8 {
-        util.runtimeCheck(span.argv_index < args.len, "tried getting argument text with a span that is out of range", .{});
-        const arg = args.get(span.argv_index);
+        std.debug.assert(@intFromEnum(span.argv_index) < args.len);
+        const arg = span.argv_index.get(args);
         return arg[span.start..span.end];
     }
 };

@@ -59,7 +59,7 @@ pub const ArgzType = union(enum) {
     /// Returns `true` if the type represented by `ty` requires a memory allocator to parse.
     pub fn requiresAllocator(comptime ty: ArgzType) bool {
         return switch (ty) {
-            .flag_help, .trailing_positionals, .counter => false,
+            .flag_help, .trailing, .counter => false,
             .multi => |m| m.storage == .dynamic,
             .pair => |p| ArgzType.fromZigType(p.lhs_type).requiresAllocator() or ArgzType.fromZigType(p.rhs_type).requiresAllocator(),
             .zig_primitive => |prim| switch (@typeInfo(prim)) {
@@ -151,7 +151,7 @@ pub fn validateType(
         },
         .flag_help => if (purpose != .flag)
             @compileError("type '" ++ @typeName(T) ++ "' can only be the type of a flag"),
-        .trailing_positionals => if (purpose != .positional)
+        .trailing => if (purpose != .positional)
             @compileError("type '" ++ @typeName(T) ++ "' can only be the type of a positional argument"),
     }
 }
