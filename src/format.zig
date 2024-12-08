@@ -77,7 +77,7 @@ pub fn formatAllFlagsDefault(
                 max_flag_type_pad = @max(
                     max_flag_type_pad,
                     (std.unicode.utf8CountCodepoints(flag.typeString(true)) catch unreachable) +
-                        @intFromBool(@typeInfo(flag.type == .optional)),
+                        @intFromBool(@typeInfo(flag.type) == .optional),
                 );
             }
         }

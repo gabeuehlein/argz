@@ -50,7 +50,7 @@ pub const ArgzType = union(enum) {
             else if (T == argz.Trailing)
                 .trailing
             else switch (@typeInfo(T)) {
-                .int, .float, .bool, .void, .array, .pointer, .optional => .{ .zig_primitive = T },
+                .int, .float, .bool, .void, .array, .pointer, .optional, .@"enum" => .{ .zig_primitive = T },
                 else => @compileError("internal argz error: found unexpected type '" ++ @typeName(T) ++ "'"),
             };
         }
@@ -138,7 +138,7 @@ pub fn validateType(
                     @compileError("invalid type: '" ++ @typeName(T) ++ "'"),
                 else => validateType(arr.child, purpose, true, support_allocation),
             },
-            .int, .float, .bool, .void => {},
+            .int, .float, .bool, .void, .@"enum" => {},
             .optional => |opt| if (pair_lhs)
                 @compileError("optional type cannot be the LHS of a pair")
             else if (@typeInfo(opt.child) == .optional)
