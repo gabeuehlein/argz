@@ -61,6 +61,7 @@ pub const Config = struct {
         flags: fmt.AllFlagsFormatFn = fmt.formatAllFlagsDefault,
         commands: fmt.AllCommandsFormatFn = fmt.formatAllCommandsDefault,
         prologue: fmt.PrologueFormatFn = fmt.formatPrologueDefault,
+        expanded_help: fmt.ExpandedHelpFormatFn = fmt.formatExpandedHelpDefault,
     } = .{},
 };
 
@@ -80,8 +81,9 @@ pub const Command = struct {
     /// Whether to designate this flag as a help command. Note that multiple such help commands can
     /// exist in one set of commands, and it is not checked that there is at most one help command.
     is_help: bool = false,
-    /// A detailed string documenting the command's usage.
+    /// A detailed string documenting the command's purpose. For use within instances of a `--help=cmd:<command>` flag;
     info: ?[]const u8 = null,
+    // TODO: implement command aliases
 
     pub fn fieldName(cmd: Command) [:0]const u8 {
         return cmd.field_name orelse cmd.cmd;
@@ -96,7 +98,9 @@ pub fn Pair(comptime First: type, comptime Second: type, comptime separator: u21
     });
 }
 
-pub const FlagAlias = union(enum) {
+/// TODO: implement flag aliases and then make
+/// this public
+const FlagAlias = union(enum) {
     long: ?[:0]const u8,
     short: ?u21,
 };
@@ -108,6 +112,8 @@ pub const Flag = struct {
     long: ?[:0]const u8 = null,
     /// A brief description of the flag's purpose and usage.
     help_msg: ?[]const u8 = null,
+    /// A detailed string documenting the flag's purpose. For use within instances of a `--help=flag:<flag>` flag;
+    info: ?[]const u8 = null,
     /// The name of the field representing the flag in the resulting flag `struct`. If `null`, the
     /// field name will be equal to the flag's long form, or the short form if no long form was provided.
     field_name: ?[:0]const u8 = null,
@@ -121,8 +127,8 @@ pub const Flag = struct {
     alt_type_name: ?[:0]const u8 = null,
     /// A list of potential aliases for this flag. No alias may be the same as another alias or the flag's
     /// primary long or short form.
-    aliases: []const FlagAlias = &.{},
-
+    /// TODO: implement flag aliases
+    /// aliases: []const FlagAlias = &.{},
     pub fn fieldName(flag: Flag) [:0]const u8 {
         return flag.field_name orelse (flag.long orelse std.fmt.comptimePrint("{u}", .{flag.short.?}));
     }
@@ -222,6 +228,8 @@ pub const Positional = struct {
     type: type,
     /// A help string describing the positional argument's use.
     help_msg: ?[]const u8 = null,
+    /// A detailed string documenting the positional's purpose. For use within instances of a `--help=pos:<positional>` flag;
+    info: ?[]const u8 = null,
 
     pub fn fieldName(comptime pos: Positional) [:0]const u8 {
         return pos.field_name orelse pos.display;
@@ -253,3 +261,29 @@ pub fn BoundedMulti(comptime T: type, comptime max_elems: usize) type {
 pub fn DynamicMulti(comptime T: type) type {
     return @TypeOf(.{ .__argz_dmulti_child = T, .__argz_dmulti_backing_type = std.ArrayListUnmanaged(@import("Parser.zig").ResolveType(T)) });
 }
+
+pub const TrailingPositionals = struct {
+    args: args.Args,
+    index: usize,
+
+    const Iterator = struct {
+        args: args.Args,
+        index: usize,
+
+        pub fn next(it: *Iterator) ?[]const u8 {
+            if (it.index >= it.args.len)
+                return null;
+            const arg = it.args.get(it.index);
+            it.index += 1;
+            return arg;
+        }
+    };
+
+    pub fn init(_args: args.Args, index: usize) TrailingPositionals {
+        return .{ .args = _args, .index = index };
+    }
+
+    pub fn iterator(self: *const TrailingPositionals) Iterator {
+        return .{ .args = self.args, .index = self.index };
+    }
+};

@@ -7,7 +7,17 @@ const Flag = argz.Flag;
 // zig fmt: off
 const cfg = argz.Config{
     .top_level_flags = &[_]Flag{
-        .{ .short = 'h', .long = "help", .type = argz.FlagHelp, .field_name = "help", .help_msg = "show this help" },
+        .{ .short = 'h', .long = "help", .type = argz.FlagHelp, .field_name = "help", .help_msg = "show this help",
+    .info = 
+\\ Shows a help message. You can also provide an argument containing
+\\ a category and topic separated by a colon (':'). That's how you're
+\\ reading this message!
+\\
+\\ Example usage is as follows:
+\\     <program> --help=flag:help
+\\ Here 'flag' is the category and 'help' is the topic.
+\\ Other categories include 'cmd', 'command', 'pos', 'and positional'.
+,},
     },
     .mode = .{ .standard = &[_]Positional{
         Positional{

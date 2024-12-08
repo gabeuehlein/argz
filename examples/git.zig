@@ -20,7 +20,13 @@ const cfg = argz.Config{
                     .display = "PATHSPEC",
                     .help_msg = "path to the repository",
                     .field_name = "path_spec",
-                }
+                },
+                Positional{
+                    .type = argz.Trailing,
+                    .display = "EXTRA",
+                    .help_msg = "extra arguments",
+                    .field_name = "extra",
+                },
             } },
             .flags = &.{
                 Flag{

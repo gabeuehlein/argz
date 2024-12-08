@@ -3,10 +3,20 @@ const builtin = @import("builtin");
 const util = @import("util.zig");
 const Span = @import("Lexer.zig").Span;
 
+fn emptyArgsGetFn(_: *const anyopaque, _: usize) []const u8 {
+    unreachable;
+}
+
 pub const Args = struct {
     v_argv_get: *const fn (*const anyopaque, usize) []const u8,
     context: *const anyopaque,
     len: usize,
+
+    pub const empty = Args{
+        .v_argv_get = emptyArgsGetFn,
+        .context = undefined,
+        .len = 0,
+    };
 
     pub fn get(args: Args, index: usize) []const u8 {
         return args.v_argv_get(args.context, index);

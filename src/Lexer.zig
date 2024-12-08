@@ -226,6 +226,10 @@ pub fn nextToken(lexer: *Lexer, comptime flags: []const Flag, comptime word_mode
             return lexer.shortFlag(flags, lexer.subargi);
         }
     }
+    if (lexer.found_force_stop) {
+        defer lexer.argi += 1;
+        return .{ .positional = .{ .argv_index = @enumFromInt(lexer.argi) } };
+    }
     const first_arg = lexer.currentArg() orelse return null;
     if (lexer.maybe('-')) {
         if (lexer.maybe('-')) {
@@ -233,12 +237,15 @@ pub fn nextToken(lexer: *Lexer, comptime flags: []const Flag, comptime word_mode
                 // We found a "--" token; figure out what to do with it
                 _ = lexer.loadNextArg();
                 return switch (word_mode) {
-                    .positionals => .force_stop,
+                    .positionals => blk: {
+                        lexer.found_force_stop = true;
+                        break :blk .force_stop;
+                    },
                     .commands => .{ .err = .unexpected_force_stop },
                 };
             } else return lexer.longFlag(flags, first_arg);
         } else if (first_arg.len == 1) {
-            defer lexer.argi += 1;
+            defer _ = lexer.loadNextArg();
             return switch (word_mode) {
                 .positionals => .{ .positional = .{ .argv_index = @enumFromInt(lexer.argi) } },
                 .commands => |data| inline for (data.commands, 0..) |cmd, i| {
@@ -344,12 +351,9 @@ fn longFlag(lexer: *Lexer, comptime flags: []const Flag, arg: []const u8) Token 
     lexer.subargi = 0;
 
     const flag_end = std.mem.indexOfScalar(u8, arg, '=');
-    const old_argi = lexer.argi;
     var found = false;
     defer {
         if (found)
-            _ = lexer.loadNextArg();
-        if (old_argi != lexer.argi)
             _ = lexer.loadNextArg();
     }
 
@@ -422,6 +426,7 @@ fn peek(lexer: *const Lexer) ?u21 {
 
 fn maybe(lexer: *Lexer, char: u21) bool {
     const arg = lexer.currentArg() orelse return false;
+    if (lexer.subargi >= arg.len) return false;
 
     const char_len, const next_char = decodeCharAtArgPos(arg, lexer.subargi);
     if (next_char == char) {

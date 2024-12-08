@@ -159,6 +159,38 @@ pub fn parseDynamicValue(comptime T: type, allocator: std.mem.Allocator, string:
     return result;
 }
 
+pub fn freeExt(allocator: std.mem.Allocator, value: anytype) void {
+    const argzType = util.ArgzType.fromZigType;
+    switch (argzType(@TypeOf(value))) {
+        .pair => |p| {
+            if (argzType(p.lhs_type).requiresAllocator())
+                freeExt(p[0]);
+            if (argzType(p.rhs_type).requiresAllocator())
+                freeExt(p[1]);
+        },
+        .multi => |m| {
+            if (argzType(m.child).requiresAllocator()) {
+                for (value.items) |itm| {
+                    freeExt(allocator, itm);
+                }
+            }
+            value.deinit(allocator);
+        },
+        .zig_primitive => |prim| switch (@typeInfo(prim)) {
+            inline .pointer, .array => |agg| if (prim != []const u8) {
+                if (argzType(agg.child).requiresAllocator()) {
+                    for (value[0..]) |itm| {
+                        freeExt(allocator, itm);
+                    }
+                }
+                allocator.free(value);
+            },
+            else => {},
+        },
+        else => {},
+    }
+}
+
 test parseStaticValue {
     inline for (.{
         .{ u32, "12345", 12345 },

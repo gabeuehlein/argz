@@ -27,6 +27,15 @@ pub const PrologueFormatFn = fn (
     writer: anytype,
 ) anyerror!void;
 
+pub const ExpandedHelpFormatFn = fn (
+    comptime mode: Mode,
+    comptime flags: []const Flag,
+    use_ansi_escape_codes: bool,
+    help_category: []const u8,
+    help_topic: []const u8,
+    writer: anytype,
+) anyerror!void;
+
 pub const CommandFormatFn = fn (
     comptime Command,
     ?Color,
@@ -227,10 +236,76 @@ pub fn formatPrologueDefault(
             }
             try writer.writeAll("]" ** num_optional_positionals);
             if (positionals.len != 0 and positionals[positionals.len - 1].type == argz.Trailing) {
-                try writer.print(" {s}", .{ansi.ansiFormatter("[ -- " ++ positionals[positionals.len - 1].displayString() ++ "]", emit_ansi_codes, .cyan, .bold)});
+                try writer.print(" {s}", .{ansi.ansiFormatter(comptime "[ -- " ++ positionals[positionals.len - 1].displayString() ++ "]", emit_ansi_codes, .cyan, .bold)});
             }
         },
         .commands => try writer.print(" {s}", .{ansi.ansiFormatter("COMMAND", emit_ansi_codes, .cyan, .bold)}),
     }
     try writer.writeByte('\n');
+}
+
+pub fn formatExpandedHelpDefault(
+    comptime mode: Mode,
+    comptime flags: []const Flag,
+    use_ansi_escape_codes: bool,
+    help_category: []const u8,
+    help_topic: []const u8,
+    writer: anytype,
+) (@TypeOf(writer).Error || error{ DifferentModeActive, NoHelpAvailable, UnknownHelpCategory, UnknownHelpTopic })!void {
+    if (help_category.len > 32)
+        return error.UnknownHelpCategory;
+    const Category = enum { cmd, command, pos, positional, flag };
+    var tmp: [32]u8 = undefined;
+    for (0.., help_category) |i, chr| {
+        tmp[i] = std.ascii.toLower(chr);
+    }
+    switch (std.meta.stringToEnum(Category, tmp[0..help_category.len]) orelse return error.UnknownHelpCategory) {
+        .command, .cmd => switch (mode) {
+            .commands => |cmds| {
+                inline for (cmds) |cmd| {
+                    if (std.mem.eql(u8, cmd.cmd, help_topic)) {
+                        const help = cmd.info orelse cmd.help_msg orelse return error.NoHelpAvailable;
+                        try writer.print("Help for command '{s}':\n{s}\n", .{
+                            ansi.ansiFormatter(cmd.cmd, use_ansi_escape_codes, .white, .bold),
+                            help,
+                        });
+                        return;
+                    }
+                }
+                return error.UnknownHelpTopic;
+            },
+            .standard => return error.DifferentModeActive,
+        },
+        .positional, .pos => switch (mode) {
+            .standard => |positionals| {
+                inline for (positionals) |pos| {
+                    if (std.mem.eql(u8, pos.displayString(), help_topic)) {
+                        const help = pos.info orelse (pos.help_msg orelse return error.NoHelpAvailable);
+                        try writer.print("Help for positional '{s}':\n{s}\n", .{ ansi.ansiFormatter(pos.displayString(), use_ansi_escape_codes, .white, .bold), help });
+                        return;
+                    }
+                }
+                return error.UnknownHelpTopic;
+            },
+            .commands => return error.DifferentModeActive,
+        },
+        .flag => {
+            inline for (flags) |flag| {
+                const matches_long = if (flag.long) |long|
+                    std.mem.eql(u8, long, help_topic)
+                else
+                    false;
+                const matches_short = if (flag.short) |short|
+                    std.mem.eql(u8, &comptime std.unicode.utf8EncodeComptime(short), help_topic)
+                else
+                    false;
+                if (matches_long or matches_short) {
+                    const help = flag.info orelse (flag.help_msg orelse return error.NoHelpAvailable);
+                    try writer.print("Help for flag '{s}':\n{s}\n", .{ ansi.ansiFormatter(if (matches_long) "--" ++ flag.long.? else "-" ++ std.unicode.utf8EncodeComptime(flag.short.?), use_ansi_escape_codes, .white, .bold), help });
+                    return;
+                }
+            }
+            return error.UnknownHelpTopic;
+        },
+    }
 }

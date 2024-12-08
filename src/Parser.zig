@@ -1,5 +1,5 @@
 const std = @import("std");
-const root = @import("argz.zig");
+const argz = @import("argz.zig");
 const util = @import("util.zig");
 const Lexer = @import("Lexer.zig");
 const HelpPrinter = @import("help.zig").HelpPrinter;
@@ -9,14 +9,16 @@ const ansi = @import("ansi.zig");
 const assert = std.debug.assert;
 
 const a = ansi.ansiFormatter;
-const Flag = root.Flag;
-const Command = root.Command;
-const Mode = root.Mode;
-const Config = root.Config;
+const Flag = argz.Flag;
+const Command = argz.Command;
+const Mode = argz.Mode;
+const Config = argz.Config;
 const Allocator = std.mem.Allocator;
 const Args = @import("args.zig").Args;
 
 const Type = std.builtin.Type;
+
+const TrailingPositionals = argz.TrailingPositionals;
 
 /// Doesn't check the validity of the type beforehand.
 pub fn ResolveType(comptime T: type) type {
@@ -29,7 +31,7 @@ pub fn ResolveType(comptime T: type) type {
         .multi => |m| ResolveType(m.child),
         .counter => @compileError("internal argz error: type '" ++ @typeName(T) ++ "' shouldn't have been resolved"),
         .zig_primitive => |ty| if (ty == void) bool else ty,
-        .trailing => []const []const u8,
+        .trailing => TrailingPositionals,
         .flag_help => void,
     };
 }
@@ -117,12 +119,12 @@ fn TypeFromMode(comptime mode: Mode, comptime support_allocation: bool) type {
             var found_optional = false;
 
             for (0.., positionals) |i, positional| {
-                if (i != positionals.len and util.ArgzType.fromZigType(positional.type).requiresAllocator())
+                if (!support_allocation and i != positionals.len and util.ArgzType.fromZigType(positional.type).requiresAllocator())
                     @compileError("positional argument type '" ++ @typeName(positional.type) ++ "' requires an allocator to parse");
                 if (@typeInfo(positional.type) == .optional) {
                     if (!found_optional)
                         found_optional = true;
-                } else if (found_optional and positional.type != root.Trailing)
+                } else if (found_optional and positional.type != argz.Trailing)
                     @compileError("optional positionals must be at the end of a positional list");
                 util.validateType(positional.type, .positional, false, false, support_allocation);
                 struct_fields[i] = Type.StructField{
@@ -144,7 +146,7 @@ fn TypeFromMode(comptime mode: Mode, comptime support_allocation: bool) type {
     };
 }
 
-fn ArgParser(comptime cfg: root.Config) type {
+fn ArgParser(comptime cfg: argz.Config) type {
     return struct {
         const Self = @This();
 
@@ -224,13 +226,22 @@ fn ArgParser(comptime cfg: root.Config) type {
                     }
                 },
                 .flag_help => {
-                    if (val) |v| {
-                        _ = v;
-                        @panic("TODO: handle --help=(flag|cmd|pos):[data]");
-                    }
                     var stdout = std.io.getStdOut();
                     const w = stdout.writer();
-                    try self.writeHelpFull(w, self.stdout_supports_ansi, flags, command_stack, mode);
+                    if (val) |v| {
+                        const colon_idx = std.mem.indexOfScalar(u8, v, ':') orelse return self.fail("colon separator (':') missing in help flag argument '{s}'", .{v});
+                        const category = v[0..colon_idx];
+                        const topic = v[colon_idx + 1 ..];
+                        cfg.formatters.expanded_help(mode, flags, self.stdout_supports_ansi, category, topic, w) catch |e| switch (e) {
+                            error.UnknownHelpTopic => return self.fail("unknown help topic for category '{s}': {s}", .{ category, topic }),
+                            error.UnknownHelpCategory => return self.fail("unknown help category '{s}'", .{category}),
+                            error.NoHelpAvailable => return self.fail("no help available for '{s}:{s}'", .{ category, topic }),
+                            error.DifferentModeActive => return self.fail("category '{s}' is unavailable", .{category}),
+                            else => return e,
+                        };
+                    } else {
+                        try self.writeHelpFull(w, self.stdout_supports_ansi, flags, command_stack, mode);
+                    }
                     std.process.exit(0);
                 },
                 .trailing => unreachable,
@@ -300,7 +311,7 @@ fn ArgParser(comptime cfg: root.Config) type {
         }
 
         /// Prints a message depending on the `ParseError` provided, and returns `error.ArgParseError`
-        fn handleInternalError(self: *const @This(), comptime flag_data: ?struct { Flag, FlagType }, comptime positional: ?root.Positional, val: ?[]const u8, err: ParseError) ParseError {
+        fn handleInternalError(self: *const @This(), comptime flag_data: ?struct { Flag, FlagType }, comptime positional: ?argz.Positional, val: ?[]const u8, err: ParseError) ParseError {
             const args2 = if (flag_data) |data| .{
                 "flag",
                 data[0].flagString(data[1]),
@@ -342,26 +353,45 @@ fn ArgParser(comptime cfg: root.Config) type {
 
         pub fn parseInner(self: *Self, comptime mode_or_cmd: anytype, comptime flags: []const Flag, comptime cmd_stack: []const Command) ParseError!ParseInnerReturnType(mode_or_cmd, flags) {
             const mode = if (@TypeOf(mode_or_cmd) == Command) mode_or_cmd.mode else mode_or_cmd;
+            const has_trailing_positionals = comptime switch (mode) {
+                .standard => |positionals| positionals.len != 0 and positionals[positionals.len - 1].type == argz.Trailing,
+                .commands => false,
+            };
+            const has_variadic_positional = comptime switch (mode) {
+                .standard => |positionals| positionals.len > @intFromBool(has_trailing_positionals) and positionals[positionals.len - 1 - @intFromBool(has_trailing_positionals)].type == argz.Trailing,
+                .commands => false,
+            };
+            var found_trailing_positionals = false;
             var result = @as(ParseInnerReturnType(mode_or_cmd, flags), undefined);
             var flags_set = std.StaticBitSet(flags.len).initEmpty();
             var found_command = false;
             var variadic_positional_state = comptime switch (mode) {
-                .standard => |positionals| if (positionals.len == 0 or !util.ArgzType.fromZigType(positionals[positionals.len - 1].type).requiresAllocator())
+                .standard => |positionals| if (positionals.len == 0 or !util.ArgzType.fromZigType(positionals[positionals.len - 1 - @intFromBool(has_trailing_positionals)].type).requiresAllocator())
                     std.ArrayListUnmanaged(void).empty
                 else
-                    std.ArrayListUnmanaged(@typeInfo(positionals[positionals.len - 1].type).pointer.child).empty,
+                    std.ArrayListUnmanaged(@typeInfo(positionals[positionals.len - 1 - @intFromBool(has_trailing_positionals)].type).pointer.child).empty,
                 .commands => std.ArrayListUnmanaged(void).empty,
             };
-            errdefer if (cfg.support_allocation) inline for (0.., flags) |i, flag| {
-                if (flags_set.isSet(i) and comptime util.ArgzType.fromZigType(flag.type).requiresAllocator()) {}
-                if (mode == .standard and mode.standard.len != 0) {
-                    @panic("TODO");
+            var found_token = false;
+            errdefer if (cfg.support_allocation) {
+                inline for (0.., flags) |i, flag| {
+                    if (flags_set.isSet(i) and comptime util.ArgzType.fromZigType(flag.type).requiresAllocator()) {
+                        values.freeExt(self.allocator, @field(result.flags, flag.fieldName()));
+                    }
+                }
+                if (@TypeOf(variadic_positional_state) != std.ArrayListUnmanaged(void)) {
+                    if (util.ArgzType.fromZigType(@TypeOf(variadic_positional_state.pop())).requiresAllocator()) {
+                        for (variadic_positional_state.items) |itm|
+                            values.freeExt(self.allocator, itm);
+                    }
+                    variadic_positional_state.deinit(self.allocator);
                 }
             };
-            while (self.lexer.nextToken(flags, switch (mode) {
+            top: while (self.lexer.nextToken(flags, switch (mode) {
                 .standard => .positionals,
                 .commands => |cmds| .{ .commands = .{ .commands = cmds, .default = null } },
             })) |tok| {
+                found_token = true;
                 switch (tok) {
                     .err => |e| return self.handleErr(e, flags, cmd_stack),
                     inline .long_flag, .short_flag => |data, tag| switch (@intFromEnum(data.index)) {
@@ -372,21 +402,48 @@ fn ArgParser(comptime cfg: root.Config) type {
                         inline 0...flags.len - 1 => |idx| self.handleFlag(flags, idx, cmd_stack, if (tag == .long_flag_with_value) .long else .short, mode, self.lexer.args.getSpanText(data.value_span), &result.flags, &flags_set) catch |e| return self.handleInternalError(.{ flags[idx], if (tag == .long_flag) .long else .short }, null, self.lexer.args.getSpanText(data.value_span), e),
                         else => unreachable,
                     },
-                    .force_stop => {},
+                    .force_stop => if (has_trailing_positionals) {
+                        switch (self.positional_index) {
+                            inline 0...@max(1, mode.standard.len) - 1 => |idx| {
+                                const pos = mode.standard[idx];
+                                switch (@typeInfo(pos.type)) {
+                                    .optional, .pointer => {
+                                        self.positional_index = mode.standard.len - 1;
+                                    },
+                                    else => return self.fail("unexpected force stop found", .{}),
+                                }
+                            },
+                            else => unreachable,
+                        }
+                    },
                     .positional => |index| {
-                        if (mode != .standard or mode.standard.len == 0)
+                        if (mode != .standard)
                             unreachable;
                         const arg = index.argv_index.get(self.lexer.args);
                         const positionals = mode.standard;
+                        if (positionals.len == 0)
+                            return self.fail("unexpected positional argument found: '{s}'", .{arg});
                         switch (self.positional_index) {
                             inline 0...@max(1, positionals.len) - 1 => |idx| {
                                 const pos = positionals[idx];
+                                if (pos.type == argz.Trailing) {
+                                    if (!self.lexer.found_force_stop)
+                                        return self.fail("extra positional argument found: '{s}'", .{arg});
+
+                                    @field(result.positionals, pos.fieldName()) = TrailingPositionals.init(self.lexer.args, self.lexer.argi);
+                                    found_trailing_positionals = true;
+                                    // "eat" the rest of the arguments
+                                    self.lexer.argi = self.lexer.args.len;
+                                    break :top;
+                                }
                                 if (pos.type == []const u8 or @typeInfo(pos.type) != .pointer) {
                                     self.positional_index += 1;
-                                    @field(result.positionals, pos.fieldName()) = try self.parseValue(pos.type, index.argv_index.get(self.lexer.args));
+                                    @field(result.positionals, pos.fieldName()) = self.parseValue(pos.type, arg) catch |e| return self.handleInternalError(null, pos, arg, e);
                                 } else {
-                                    comptime assert(idx == positionals.len - 1);
-                                    try variadic_positional_state.append(self.allocator, try self.parseValue(@typeInfo(pos.type).pointer.child, arg));
+                                    comptime assert(idx == positionals.len - 1 - @intFromBool(has_trailing_positionals) - @intFromBool(has_variadic_positional));
+                                    if (has_trailing_positionals)
+                                        assert(!self.lexer.found_force_stop);
+                                    try variadic_positional_state.append(self.allocator, self.parseValue(@typeInfo(pos.type).pointer.child, arg) catch |e| return self.handleInternalError(null, pos, arg, e));
                                 }
                             },
                             else => return self.fail("extra positional argument found: '{s}'", .{arg}),
@@ -422,16 +479,28 @@ fn ArgParser(comptime cfg: root.Config) type {
                     },
                 }
             }
+            if (!found_token) {
+                var stdout = std.io.getStdOut();
+                const stdoutw = stdout.writer();
+                var buf_writer = std.io.bufferedWriter(stdoutw);
+                const real_writer = buf_writer.writer();
+                self.writeHelpFull(real_writer, self.stdout_supports_ansi, flags, cmd_stack, mode) catch {};
+                buf_writer.flush() catch {};
+                std.process.exit(0);
+            }
             switch (mode) {
                 .standard => |positionals| {
                     if (comptime positionals.len != 0) {
-                        const last = positionals[positionals.len - 1];
-                        if (self.positional_index < if (last.type != []const u8 and @typeInfo(last.type) == .pointer) positionals.len - 1 else positionals.len)
+                        const last_idx = positionals.len - 1 - @intFromBool(has_variadic_positional) - @intFromBool(has_trailing_positionals);
+                        if (self.positional_index < last_idx)
                             return self.fail("too few positional arguments found", .{});
-                        const pos = positionals[positionals.len - 1];
-                        if (comptime pos.type != []const u8 and @typeInfo(pos.type) == .pointer) {
-                            @field(result.positionals, positionals[positionals.len - 1].fieldName()) = try variadic_positional_state.toOwnedSlice(self.allocator);
+                        const maybe_variadic_pos = positionals[positionals.len - 1 - @intFromBool(has_trailing_positionals)];
+                        if (comptime maybe_variadic_pos.type != []const u8 and @typeInfo(maybe_variadic_pos.type) == .pointer) {
+                            @field(result.positionals, maybe_variadic_pos.fieldName()) = try variadic_positional_state.toOwnedSlice(self.allocator);
                         }
+                        const maybe_trailing_pos = positionals[positionals.len - 1];
+                        if (!found_trailing_positionals and maybe_trailing_pos.type == argz.Trailing)
+                            @field(result.positionals, maybe_trailing_pos.fieldName()) = TrailingPositionals.init(.empty, 0);
                     }
                 },
                 .commands => if (!found_command) return self.fail("no command provided", .{}),
@@ -455,7 +524,7 @@ fn ArgParser(comptime cfg: root.Config) type {
                                 break :blk tmp;
                             },
                         };
-                    } else if (comptime !(flags[i].type == root.FlagHelp or util.isCounter(flags[i].type) or util.isBoundedMulti(flags[i].type) or util.isBoundedMulti(flags[i].type))) {
+                    } else if (comptime !(flags[i].type == argz.FlagHelp or util.isCounter(flags[i].type) or util.isBoundedMulti(flags[i].type) or util.isBoundedMulti(flags[i].type))) {
                         return self.fail("missing required flag: '{s}'", .{flags[i].flagString(if (flags[i].long != null) .long else .short)});
                     }
                 }
