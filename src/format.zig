@@ -77,7 +77,7 @@ pub fn formatAllFlagsDefault(
                 max_flag_type_pad = @max(
                     max_flag_type_pad,
                     (std.unicode.utf8CountCodepoints(flag.typeString(true)) catch unreachable) +
-                        @intFromBool(@typeInfo(flag.type) == .optional),
+                        @intFromBool(@typeInfo(flag.type) == .optional) + 2,
                 );
             }
         }
@@ -118,12 +118,12 @@ pub fn formatFlagDefault(
     const flag_padding, const flag_type_padding = .{ extra.flag_desc_padding, extra.max_flag_type_padding };
     if (flag.type != void and flag.type != argz.FlagHelp) {
         try writer.writeAll(" " ** (flag_padding - total_written + 1));
-        try writer.print("={s}", .{a(if (@typeInfo(flag.type) == .optional)
-            "[={s}]"
+        try writer.print("{s}", .{a(if (@typeInfo(flag.type) == .optional)
+            "[=" ++ comptime flag.typeString(false) ++ "]"
         else
-            "<{s}>", emit_ansi_codes, .cyan, .bold)});
+            "<" ++ comptime flag.typeString(false) ++ ">", emit_ansi_codes, .cyan, .bold)});
         if (flag.help_msg) |help| {
-            try writer.writeAll(" " ** (flag_type_padding - (std.unicode.utf8CountCodepoints(flag.typeString(false)) catch unreachable) + if (@typeInfo(flag.type) == .optional) 0 else 1) ++ help);
+            try writer.writeAll(" " ** (flag_type_padding - (2 + (std.unicode.utf8CountCodepoints(flag.typeString(false)) catch unreachable) + @intFromBool(@typeInfo(flag.type) == .optional))) ++ help);
         }
     } else if (flag.help_msg) |help| {
         try writer.writeAll(" " ** (flag_padding - total_written + 1) ++ " " ** flag_type_padding ++ help);
@@ -136,8 +136,14 @@ pub fn formatFlagDefault(
             @memcpy(@as(*[1]flag.type, &tmp), @as(*const [1]flag.type, @ptrCast(@alignCast(default))));
             if (@typeInfo(flag.type) == .@"enum")
                 try writer.print(" (default '{s}')", .{@tagName(tmp)})
-            else
+            else if (flag.type == []const u8) {
+                const ptr = @as([*:0]const u8, @ptrCast(default));
+                comptime var len = 0;
+                inline while (ptr[len] != 0) : (len += 1) {}
+                try writer.print(" (default '{s}')", .{ptr[0..len]});
+            } else {
                 try writer.print(" (default '{any}')", .{tmp});
+            }
         }
     }
     try writer.writeByte('\n');
@@ -301,7 +307,15 @@ pub fn formatExpandedHelpDefault(
                     false;
                 if (matches_long or matches_short) {
                     const help = flag.info orelse (flag.help_msg orelse return error.NoHelpAvailable);
-                    try writer.print("Help for flag '{s}':\n{s}\n", .{ ansi.ansiFormatter(if (matches_long) "--" ++ flag.long.? else "-" ++ std.unicode.utf8EncodeComptime(flag.short.?), use_ansi_escape_codes, .white, .bold), help });
+                    try writer.print("Help for flag '{s}':\n{s}\n", .{
+                        ansi.ansiFormatter(
+                            if (matches_long and flag.long != null) "--" ++ flag.long.? else if (matches_short and flag.short != null) "-" ++ std.unicode.utf8EncodeComptime(flag.short.?) else unreachable,
+                            use_ansi_escape_codes,
+                            .white,
+                            .bold,
+                        ),
+                        help,
+                    });
                     return;
                 }
             }

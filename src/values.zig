@@ -80,7 +80,7 @@ pub fn parseStaticValue(comptime T: type, string: []const u8) !ParseStaticValueR
                 result = string;
             },
             .bool => result = bool_table.get(string) orelse return error.InvalidBool,
-            .@"enum" => std.meta.stringToEnum(prim, string) orelse return error.InvalidEnumVariant,
+            .@"enum" => result = std.meta.stringToEnum(prim, string) orelse return error.InvalidEnumVariant,
             inline else => comptime unreachable,
         },
         inline else => comptime unreachable,

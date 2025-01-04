@@ -1,6 +1,3 @@
-> [!WARNING]
-> This is the unstable branch. Here, I may push changes that will cause build failures or otherwise breaking changes, and therefore this branch shouldn't be relied on for projects. You probably want the [main branch](https://github.com/gabeuehlein/argz/tree/main) or a [release](https://github.com/gabeuehlein/argz/releases) instead.
-
 ## argz
 
 `argz` is a Zig library that provides utilities for parsing command line arguments. It is based on `comptime` generation of a parser for a given configuration, which means that parsing your arguments using `argz` does not require an allocator. However parsing dynamically-sized values (e.g. slices) with an allocator *is* supported if required.

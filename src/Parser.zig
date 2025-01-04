@@ -23,6 +23,7 @@ const TrailingPositionals = argz.TrailingPositionals;
 /// Doesn't check the validity of the type beforehand.
 pub fn ResolveType(comptime T: type) type {
     assert(@inComptime());
+    @setEvalBranchQuota(5000000);
 
     const argzType = util.ArgzType.fromZigType;
 
@@ -38,6 +39,7 @@ pub fn ResolveType(comptime T: type) type {
 
 fn validateFlags(comptime flags: []const Flag, comptime support_allocation: bool) void {
     assert(@inComptime());
+    @setEvalBranchQuota(5000000);
     const argzType = util.ArgzType.fromZigType;
 
     inline for (0.., flags) |i, flag| {
@@ -59,6 +61,7 @@ fn validateFlags(comptime flags: []const Flag, comptime support_allocation: bool
 
 fn TypeFromFlags(comptime flags: []const Flag, comptime support_allocation: bool) type {
     assert(@inComptime());
+    @setEvalBranchQuota(5000000);
 
     validateFlags(flags, support_allocation);
     comptime var fields = @as([flags.len]Type.StructField, undefined);
@@ -77,6 +80,7 @@ fn TypeFromFlags(comptime flags: []const Flag, comptime support_allocation: bool
 
 fn TypeFromMode(comptime mode: Mode, comptime support_allocation: bool) type {
     assert(@inComptime());
+    @setEvalBranchQuota(5000000);
 
     comptime return switch (mode) {
         .commands => |commands| {
@@ -147,6 +151,7 @@ fn TypeFromMode(comptime mode: Mode, comptime support_allocation: bool) type {
 }
 
 fn ArgParser(comptime cfg: argz.Config) type {
+    @setEvalBranchQuota(5000000);
     return struct {
         const Self = @This();
 
@@ -222,7 +227,7 @@ fn ArgParser(comptime cfg: argz.Config) type {
                         }
                     } else {
                         const v = val orelse return self.fail("expected value for flag '{s}'", .{flag.flagString(variant)});
-                        try @field(flag_data, flag.fieldName()).append(try self.parseValue(prim, v));
+                        @field(flag_data, flag.fieldName()) = try self.parseValue(prim, v);
                     }
                 },
                 .flag_help => {
@@ -252,7 +257,7 @@ fn ArgParser(comptime cfg: argz.Config) type {
             const flagStringWithRuntimeIndex = struct {
                 fn func(comptime flags1: []const Flag, comptime variant: FlagType, idx: Lexer.FlagIndex) [:0]const u8 {
                     return switch (@intFromEnum(idx)) {
-                        inline 0...flags.len - 1 => |i| {
+                        inline 0...@max(1, flags.len) - 1 => |i| {
                             if (i >= flags1.len)
                                 unreachable;
                             return flags[i].flagString(variant);
@@ -394,23 +399,27 @@ fn ArgParser(comptime cfg: argz.Config) type {
                 found_token = true;
                 switch (tok) {
                     .err => |e| return self.handleErr(e, flags, cmd_stack),
-                    inline .long_flag, .short_flag => |data, tag| switch (@intFromEnum(data.index)) {
+                    inline .long_flag, .short_flag => |data, tag| if (comptime flags.len == 0) unreachable else switch (@intFromEnum(data.index)) {
                         inline 0...flags.len - 1 => |idx| self.handleFlag(flags, idx, cmd_stack, if (tag == .long_flag) .long else .short, mode, null, &result.flags, &flags_set) catch |e| return self.handleInternalError(.{ flags[idx], if (tag == .long_flag) .long else .short }, null, null, e),
                         else => unreachable,
                     },
-                    inline .long_flag_with_value, .short_flag_with_value => |data, tag| switch (@intFromEnum(data.index)) {
+                    inline .long_flag_with_value, .short_flag_with_value => |data, tag| if (comptime flags.len == 0) unreachable else switch (@intFromEnum(data.index)) {
                         inline 0...flags.len - 1 => |idx| self.handleFlag(flags, idx, cmd_stack, if (tag == .long_flag_with_value) .long else .short, mode, self.lexer.args.getSpanText(data.value_span), &result.flags, &flags_set) catch |e| return self.handleInternalError(.{ flags[idx], if (tag == .long_flag) .long else .short }, null, self.lexer.args.getSpanText(data.value_span), e),
                         else => unreachable,
                     },
                     .force_stop => if (has_trailing_positionals) {
+                        if (mode.standard.len == 0)
+                            return self.fail("unexpected force stop found", .{});
                         switch (self.positional_index) {
                             inline 0...@max(1, mode.standard.len) - 1 => |idx| {
                                 const pos = mode.standard[idx];
-                                switch (@typeInfo(pos.type)) {
-                                    .optional, .pointer => {
-                                        self.positional_index = mode.standard.len - 1;
-                                    },
-                                    else => return self.fail("unexpected force stop found", .{}),
+                                if (pos.type != argz.Trailing) {
+                                    switch (@typeInfo(pos.type)) {
+                                        .optional, .pointer => {
+                                            self.positional_index = mode.standard.len - 1;
+                                        },
+                                        else => return self.fail("unexpected force stop found", .{}),
+                                    }
                                 }
                             },
                             else => unreachable,
@@ -430,7 +439,7 @@ fn ArgParser(comptime cfg: argz.Config) type {
                                     if (!self.lexer.found_force_stop)
                                         return self.fail("extra positional argument found: '{s}'", .{arg});
 
-                                    @field(result.positionals, pos.fieldName()) = TrailingPositionals.init(self.lexer.args, self.lexer.argi);
+                                    @field(result.positionals, pos.fieldName()) = TrailingPositionals.init(self.lexer.args, self.lexer.argi - 1);
                                     found_trailing_positionals = true;
                                     // "eat" the rest of the arguments
                                     self.lexer.argi = self.lexer.args.len;
@@ -455,7 +464,7 @@ fn ArgParser(comptime cfg: argz.Config) type {
                         switch (mode) {
                             .standard => unreachable,
                             .commands => |cmds| switch (@intFromEnum(index.index)) {
-                                inline 0...cmds.len - 1 => |idx| {
+                                inline 0...@max(1, cmds.len) - 1 => |idx| {
                                     if (comptime cmds[idx].is_help) {
                                         comptime assert(cmds[idx].mode == .standard and cmds[idx].mode.standard.len == 0);
                                         var stdout = std.io.getStdOut();
@@ -514,7 +523,9 @@ fn ArgParser(comptime cfg: argz.Config) type {
                             .pointer => blk: {
                                 comptime assert(flags[i].type == []const u8);
                                 const ptr = @as([*:0]const u8, @ptrCast(default));
-                                break :blk ptr[0..std.mem.indexOfSentinel(u8, 0, ptr)];
+                                comptime var len = 0;
+                                inline while (ptr[len] != 0) : (len += 1) {}
+                                break :blk ptr[0..len];
                             },
                             else => blk: {
                                 // FIXME: this ugly code is needed to properly coerce things like `enum`s. It can
@@ -582,11 +593,21 @@ pub fn argParser(comptime cfg: Config, args: Args, allocator: ?Allocator) !ArgPa
             else
                 return error.NoAllocatorProvided
         else
-            return .{ .lexer = Lexer{
-                .args = args,
-            }, .stdout_supports_ansi = stdout_supports_ansi, .stderr_supports_ansi = stderr_supports_ansi, .allocator = allocator.? }
+            return .{
+                .lexer = Lexer{
+                    .args = args,
+                },
+                .stdout_supports_ansi = stdout_supports_ansi,
+                .stderr_supports_ansi = stderr_supports_ansi,
+                .allocator = allocator.?,
+            }
     else
-        return .{ .lexer = Lexer{
-            .args = args,
-        }, .stdout_supports_ansi = stdout_supports_ansi, .stderr_supports_ansi = stderr_supports_ansi, .allocator = undefined };
+        return .{
+            .lexer = Lexer{
+                .args = args,
+            },
+            .stdout_supports_ansi = stdout_supports_ansi,
+            .stderr_supports_ansi = stderr_supports_ansi,
+            .allocator = undefined,
+        };
 }

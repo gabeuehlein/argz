@@ -74,8 +74,8 @@ pub const ArgzType = union(enum) {
 pub const ValidationPurpose = enum {
     flag,
     pair_in_flag,
+    pair_in_positional,
     positional,
-    positional_in_flag,
 };
 
 pub fn validateType(
