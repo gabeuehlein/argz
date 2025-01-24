@@ -129,7 +129,7 @@ pub fn formatFlagDefault(
         try writer.writeAll(" " ** (flag_padding - total_written + 1) ++ " " ** flag_type_padding ++ help);
     }
     if (flag.type != void and flag.type != argz.FlagHelp) {
-        if (flag.default_value) |default| {
+        if (flag.default_value_ptr) |default| {
             // FIXME: this ugly code is needed to properly coerce things like `enum`s. It can
             // probably be written in a less ugly way.
             var tmp: flag.type = undefined;

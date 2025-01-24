@@ -217,6 +217,17 @@ pub const Flag = struct {
             .short => std.fmt.comptimePrint("-{u}", .{flag.short orelse unreachable}),
         };
     }
+
+    pub const help: Flag = .{
+        .long = "help",
+        .short = 'h',
+        .type = FlagHelp,
+        .info =
+        \\ The '--help' flag displays help regarding program usage.
+        \\ An occurance of the '--help' flag will exit the program.
+        ,
+        .help_msg = "display this help",
+    };
 };
 
 pub const Positional = struct {
