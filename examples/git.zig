@@ -34,7 +34,7 @@ const cfg = argz.Config{
                     .type = void,
                     .help_msg = "recursively clone submodules",
                     .field_name = "recurse_submodules",
-                    .default_value = &@as(bool, false),
+                    .default_value_ptr = &@as(bool, false),
                 },
                 Flag{
                     .long = "help",

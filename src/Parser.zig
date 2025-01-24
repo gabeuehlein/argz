@@ -72,7 +72,7 @@ fn TypeFromFlags(comptime flags: []const Flag, comptime support_allocation: bool
             .type = FlagType,
             .alignment = 0,
             .is_comptime = false,
-            .default_value = null,
+            .default_value_ptr = null,
         };
     }
     return @Type(.{ .@"struct" = .{ .fields = &fields, .layout = .auto, .decls = &.{}, .is_tuple = false } });
@@ -134,7 +134,7 @@ fn TypeFromMode(comptime mode: Mode, comptime support_allocation: bool) type {
                 struct_fields[i] = Type.StructField{
                     .name = positional.fieldName(),
                     .type = ResolveType(positional.type),
-                    .default_value = null,
+                    .default_value_ptr = null,
                     .is_comptime = false,
                     .alignment = 0,
                 };
@@ -292,7 +292,6 @@ fn ArgParser(comptime cfg: argz.Config) type {
 
             stderrw.print("{s} ", .{a("error:", self.stderr_supports_ansi, .red, .bold)}) catch {};
             comptime var p = std.fmt.Parser{
-                .buf = fmt,
                 .pos = 0,
                 .iter = .{ .i = 0, .bytes = fmt },
             };
@@ -518,23 +517,10 @@ fn ArgParser(comptime cfg: argz.Config) type {
                 if (!flags_set.isSet(i)) {
                     if (flags[i].type == void) {
                         @field(result.flags, flags[i].fieldName()) = false;
-                    } else if (flags[i].default_value) |default| {
-                        @field(result.flags, flags[i].fieldName()) = switch (@typeInfo(flags[i].type)) {
-                            .pointer => blk: {
-                                comptime assert(flags[i].type == []const u8);
-                                const ptr = @as([*:0]const u8, @ptrCast(default));
-                                comptime var len = 0;
-                                inline while (ptr[len] != 0) : (len += 1) {}
-                                break :blk ptr[0..len];
-                            },
-                            else => blk: {
-                                // FIXME: this ugly code is needed to properly coerce things like `enum`s. It can
-                                // probably be written in a less ugly way.
-                                var tmp: flags[i].type = undefined;
-                                @memcpy(@as(*[1]flags[i].type, &tmp), @as(*const [1]flags[i].type, @ptrCast(@alignCast(default))));
-                                break :blk tmp;
-                            },
-                        };
+                    } else if (flags[i].type != argz.FlagHelp) {
+                        if (flags[i].defaultValue()) |default| {
+                            @field(result.flags, flags[i].fieldName()) = default;
+                        }
                     } else if (comptime !(flags[i].type == argz.FlagHelp or util.isCounter(flags[i].type) or util.isBoundedMulti(flags[i].type) or util.isBoundedMulti(flags[i].type))) {
                         return self.fail("missing required flag: '{s}'", .{flags[i].flagString(if (flags[i].long != null) .long else .short)});
                     }
@@ -554,7 +540,7 @@ fn ArgParser(comptime cfg: argz.Config) type {
             comptime flags: []const Flag,
             comptime command_stack: []const Command,
             comptime mode: Mode,
-        ) @TypeOf(writer).Error!void {
+        ) !void {
             try cfg.formatters.prologue(
                 command_stack,
                 mode,

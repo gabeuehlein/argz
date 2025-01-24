@@ -3,7 +3,13 @@ const builtin = @import("builtin");
 const argz = @import("argz.zig");
 
 const assert = std.debug.assert;
-pub const ParseValueError = error{ IntegerOverflow, NotEnoughArguments, TooManyArguments, InvalidBool, InvalidEnumField } || std.fmt.ParseIntError || std.fmt.ParseFloatError;
+pub const ParseValueError = error{
+    IntegerOverflow,
+    NotEnoughArguments,
+    TooManyArguments,
+    InvalidBool,
+    InvalidEnumField,
+} || std.fmt.ParseIntError || std.fmt.ParseFloatError;
 
 pub const FlagType = enum { long, short };
 
@@ -124,7 +130,7 @@ pub fn validateType(
             }
         },
         .zig_primitive => |prim| switch (@typeInfo(prim)) {
-            .pointer => |ptr| if (ptr.size != .Slice)
+            .pointer => |ptr| if (ptr.size != .slice)
                 @compileError("pointer type must be '.Slice'")
             else if (!support_allocation and (!(ptr.child == u8 and ptr.is_const) and ptr.sentinel != null))
                 @compileError("type '" ++ @typeName(T) ++ "' is not supported without an allocator")

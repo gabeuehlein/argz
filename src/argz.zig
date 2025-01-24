@@ -84,6 +84,7 @@ pub const Command = struct {
     /// A detailed string documenting the command's purpose. For use within instances of a `--help=cmd:<command>` flag;
     info: ?[]const u8 = null,
     // TODO: implement command aliases
+    aliases: []const [:0]const u8 = &.{},
 
     pub fn fieldName(cmd: Command) [:0]const u8 {
         return cmd.field_name orelse cmd.cmd;
@@ -91,11 +92,12 @@ pub const Command = struct {
 };
 
 pub fn Pair(comptime First: type, comptime Second: type, comptime separator: u21) type {
-    return @TypeOf(.{
-        .__argz_pair_tag = {},
-        .__argz_pair_result = struct { First, Second },
-        .__argz_pair_separator = separator,
-    });
+    return struct {
+        argz_pair_tag: void = {},
+
+        pub const argz_pair_result = struct { First, Second };
+        pub const argz_pair_separator = separator;
+    };
 }
 
 /// TODO: implement flag aliases and then make
@@ -121,7 +123,7 @@ pub const Flag = struct {
     /// boolean indicating whether this flag was found in the argument list.
     type: type = void,
     /// A default value for the flag.
-    default_value: ?*const anyopaque = null,
+    default_value_ptr: ?*const anyopaque = null,
     /// An alternative type name to display in place of a flag's type. For example, one might specify
     /// this to be `"PATH"` if a string argument should represent a filesystem path.
     alt_type_name: ?[:0]const u8 = null,
@@ -131,6 +133,10 @@ pub const Flag = struct {
     /// aliases: []const FlagAlias = &.{},
     pub fn fieldName(flag: Flag) [:0]const u8 {
         return flag.field_name orelse (flag.long orelse std.fmt.comptimePrint("{u}", .{flag.short.?}));
+    }
+
+    pub fn defaultValue(flag: Flag) ?flag.type {
+        return @as(*const flag.type, @ptrCast(@alignCast(flag.default_value_ptr orelse return null))).*;
     }
 
     pub fn hasDynamicValue(comptime flag: Flag, comptime support_allocation: bool) bool {
@@ -251,7 +257,9 @@ pub const Positional = struct {
 pub const Trailing = struct {};
 
 pub fn Counter(comptime T: type) type {
-    return @TypeOf(.{ .__argz_counter_type = T });
+    return struct {
+        pub const argz_counter_int = T;
+    };
 }
 
 pub fn BoundedMulti(comptime T: type, comptime max_elems: usize) type {

@@ -136,8 +136,8 @@ pub fn parseDynamicValue(comptime T: type, allocator: std.mem.Allocator, string:
             .pointer => |ptr| {
                 if (ptr.is_const and ptr.child == u8) {
                     // string, maybe sentinel-terminated
-                    if (ptr.sentinel) |sentinel| {
-                        const buf = try allocator.allocSentinel(u8, string.len, @as(*const u8, @ptrCast(@alignCast(sentinel))).*);
+                    if (ptr.sentinel()) |sentinel| {
+                        const buf = try allocator.allocSentinel(u8, string.len, sentinel);
                         @memcpy(buf, string);
                         result = buf;
                     } else {
