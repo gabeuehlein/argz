@@ -63,7 +63,7 @@ pub fn parseStaticValue(comptime T: type, string: []const u8) !ParseStaticValueR
         },
         .zig_primitive => |prim| switch (@typeInfo(prim)) {
             .int => result = try fmt.parseInt(prim, string, 0),
-            .float => result = try fmt.parseFloat(prim, string, 0),
+            .float => result = try fmt.parseFloat(prim, string),
             .array => |arr| {
                 var split = std.mem.splitScalar(u8, string, ',');
                 var i: usize = 0;
