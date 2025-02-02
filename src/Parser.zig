@@ -167,7 +167,7 @@ fn ArgParser(comptime cfg: argz.Config) type {
 
         const FlagType = util.FlagType;
 
-        fn parseValue(self: *const Self, comptime T: type, string: []const u8) !ResolveType(T) {
+        inline fn parseValue(self: *const Self, comptime T: type, string: []const u8) !ResolveType(T) {
             const R = ResolveType(T);
             if (cfg.support_allocation)
                 return try values.parseDynamicValue(R, self.allocator, string)
@@ -175,7 +175,7 @@ fn ArgParser(comptime cfg: argz.Config) type {
                 return try values.parseStaticValue(R, string);
         }
 
-        fn handleFlag(
+        inline fn handleFlag(
             self: *Self,
             comptime flags: []const Flag,
             comptime index: usize,
@@ -187,7 +187,16 @@ fn ArgParser(comptime cfg: argz.Config) type {
             flags_set: *std.StaticBitSet(flags.len),
         ) !void {
             const flag = flags[index];
-            defer flags_set.set(index);
+            switch (variant) {
+                .long => if (flag.long == null) unreachable,
+                .short => if (flag.short == null) unreachable,
+            }
+            var ok = true;
+            defer {
+                if (ok)
+                    flags_set.set(index);
+            }
+            errdefer ok = false;
             switch (util.ArgzType.fromZigType(flag.type)) {
                 .counter => if (val) |v| {
                     return self.fail("wasn't expecting value '{s}' for flag '{s}'", .{ v, flag.flagString(variant) });
@@ -224,6 +233,12 @@ fn ArgParser(comptime cfg: argz.Config) type {
                             @field(flag_data, flag.fieldName()) = try self.parseValue(@typeInfo(prim).optional.child, v);
                         } else {
                             @field(flag_data, flag.fieldName()) = null;
+                        }
+                    } else if (@typeInfo(prim) == .array and @typeInfo(@typeInfo(prim).array.child) == .optional) {
+                        if (val) |v| {
+                            @field(flag_data, flag.fieldName()) = try self.parseValue(prim, v);
+                        } else {
+                            @field(flag_data, flag.fieldName()) = @splat(null);
                         }
                     } else {
                         const v = val orelse return self.fail("expected value for flag '{s}'", .{flag.flagString(variant)});
@@ -283,14 +298,13 @@ fn ArgParser(comptime cfg: argz.Config) type {
             };
         }
 
-        /// Internal function to emit a formatted error
-        fn fail(self: *const @This(), comptime fmt: []const u8, args: anytype) ParseError {
+        fn emitInfo(self: *const @This(), comptime class_color: ansi.TerminalColor, comptime fmt_color: ansi.TerminalColor, comptime class: []const u8, comptime fmt: []const u8, args: anytype) void {
             const stderr = std.io.getStdErr();
-            stderr.lock(.exclusive) catch return error.ArgParseError;
+            stderr.lock(.exclusive) catch return;
             defer stderr.unlock();
             var stderrw = stderr.writer();
 
-            stderrw.print("{s} ", .{a("error:", self.stderr_supports_ansi, .red, .bold)}) catch {};
+            stderrw.print("{s} ", .{a(class ++ ":", self.stderr_supports_ansi, class_color, .bold)}) catch {};
             comptime var p = std.fmt.Parser{
                 .pos = 0,
                 .iter = .{ .i = 0, .bytes = fmt },
@@ -298,10 +312,10 @@ fn ArgParser(comptime cfg: argz.Config) type {
             comptime var i = 0;
             inline while (true) : (i += 1) {
                 const str = comptime p.until('{');
-                stderrw.print("{s}", .{a(str, self.stderr_supports_ansi, .blue, null)}) catch {};
+                stderrw.print("{s}", .{a(str, self.stderr_supports_ansi, fmt_color, null)}) catch {};
                 if (comptime p.maybe('{')) {
                     if (comptime p.maybe('{')) {
-                        try stderrw.writeByte('}');
+                        stderrw.writeByte('}') catch {};
                     } else {
                         const fmt_spec = comptime p.until('}');
                         if (!comptime p.maybe('}')) unreachable;
@@ -309,9 +323,23 @@ fn ArgParser(comptime cfg: argz.Config) type {
                     }
                 } else break;
             }
-            try stderrw.writeByte('\n');
+            stderrw.writeByte('\n') catch {};
             comptime assert(i == @typeInfo(@TypeOf(args)).@"struct".fields.len);
+        }
+
+        /// Internal function to emit a formatted error
+        fn fail(self: *const @This(), comptime fmt: []const u8, args: anytype) ParseError {
+            self.emitInfo(.red, .blue, "error", fmt, args);
             return error.ArgParseError;
+        }
+
+        pub fn fatal(self: *const @This(), comptime fmt: []const u8, args: anytype) noreturn {
+            self.fail(fmt, args) catch {};
+            std.process.exit(1);
+        }
+
+        pub fn warn(self: *const @This(), comptime fmt: []const u8, args: anytype) void {
+            self.emitInfo(.yellow, .blue, "warning", fmt, args);
         }
 
         /// Prints a message depending on the `ParseError` provided, and returns `error.ArgParseError`
@@ -379,7 +407,7 @@ fn ArgParser(comptime cfg: argz.Config) type {
             var found_token = false;
             errdefer if (cfg.support_allocation) {
                 inline for (0.., flags) |i, flag| {
-                    if (flags_set.isSet(i) and comptime util.ArgzType.fromZigType(flag.type).requiresAllocator()) {
+                    if (flags_set.isSet(i) and util.ArgzType.fromZigType(flag.type).requiresAllocator()) {
                         values.freeExt(self.allocator, @field(result.flags, flag.fieldName()));
                     }
                 }
@@ -391,6 +419,12 @@ fn ArgParser(comptime cfg: argz.Config) type {
                     variadic_positional_state.deinit(self.allocator);
                 }
             };
+            const dbg = struct {
+                fn dbg(v: anytype) @TypeOf(v) {
+                    std.log.err("{any}", .{v});
+                    return v;
+                }
+            }.dbg;
             top: while (self.lexer.nextToken(flags, switch (mode) {
                 .standard => .positionals,
                 .commands => |cmds| .{ .commands = .{ .commands = cmds, .default = null } },
@@ -398,12 +432,17 @@ fn ArgParser(comptime cfg: argz.Config) type {
                 found_token = true;
                 switch (tok) {
                     .err => |e| return self.handleErr(e, flags, cmd_stack),
-                    inline .long_flag, .short_flag => |data, tag| if (comptime flags.len == 0) unreachable else switch (@intFromEnum(data.index)) {
-                        inline 0...flags.len - 1 => |idx| self.handleFlag(flags, idx, cmd_stack, if (tag == .long_flag) .long else .short, mode, null, &result.flags, &flags_set) catch |e| return self.handleInternalError(.{ flags[idx], if (tag == .long_flag) .long else .short }, null, null, e),
+                    inline .long_flag, .short_flag => |data, tag| if (comptime flags.len == 0 and blk: {
+                        _ = dbg(tag);
+                        break :blk true;
+                    }) unreachable else switch (@intFromEnum(data.index)) {
+                        inline 0...flags.len - 1 => |idx| self.handleFlag(flags, idx, cmd_stack, if (tag == .long_flag) .long else .short, mode, null, &result.flags, &flags_set) catch |e| {
+                            return self.handleInternalError(.{ flags[idx], if (tag == .long_flag) .long else .short }, null, null, e);
+                        },
                         else => unreachable,
                     },
                     inline .long_flag_with_value, .short_flag_with_value => |data, tag| if (comptime flags.len == 0) unreachable else switch (@intFromEnum(data.index)) {
-                        inline 0...flags.len - 1 => |idx| self.handleFlag(flags, idx, cmd_stack, if (tag == .long_flag_with_value) .long else .short, mode, self.lexer.args.getSpanText(data.value_span), &result.flags, &flags_set) catch |e| return self.handleInternalError(.{ flags[idx], if (tag == .long_flag) .long else .short }, null, self.lexer.args.getSpanText(data.value_span), e),
+                        inline 0...flags.len - 1 => |idx| self.handleFlag(flags, idx, cmd_stack, if (tag == .long_flag_with_value) .long else .short, mode, self.lexer.args.getSpanText(data.value_span), &result.flags, &flags_set) catch |e| return self.handleInternalError(.{ flags[idx], if (tag == .long_flag_with_value) .long else .short }, null, self.lexer.args.getSpanText(data.value_span), e),
                         else => unreachable,
                     },
                     .force_stop => if (has_trailing_positionals) {
@@ -517,12 +556,12 @@ fn ArgParser(comptime cfg: argz.Config) type {
                 if (!flags_set.isSet(i)) {
                     if (flags[i].type == void) {
                         @field(result.flags, flags[i].fieldName()) = false;
-                    } else if (flags[i].type != argz.FlagHelp) {
+                    } else if (comptime !(flags[i].type == argz.FlagHelp or util.isCounter(flags[i].type) or util.isMulti(flags[i].type))) {
                         if (flags[i].defaultValue()) |default| {
                             @field(result.flags, flags[i].fieldName()) = default;
+                        } else {
+                            return self.fail("missing required flag: '{s}'", .{flags[i].flagString(if (flags[i].long != null) .long else .short)});
                         }
-                    } else if (comptime !(flags[i].type == argz.FlagHelp or util.isCounter(flags[i].type) or util.isBoundedMulti(flags[i].type) or util.isBoundedMulti(flags[i].type))) {
-                        return self.fail("missing required flag: '{s}'", .{flags[i].flagString(if (flags[i].long != null) .long else .short)});
                     }
                 }
             }

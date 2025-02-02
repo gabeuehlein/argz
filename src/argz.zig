@@ -91,12 +91,13 @@ pub const Command = struct {
     }
 };
 
-pub fn Pair(comptime First: type, comptime Second: type, comptime separator: u21) type {
+pub fn Pair(comptime First: type, comptime Second: type, comptime _separator: u21) type {
     return struct {
         argz_pair_tag: void = {},
 
-        pub const argz_pair_result = struct { First, Second };
-        pub const argz_pair_separator = separator;
+        pub const Lhs = First;
+        pub const Rhs = Second;
+        pub const separator = _separator;
     };
 }
 
@@ -112,6 +113,11 @@ pub const Flag = struct {
     short: ?u21 = null,
     /// The long form of the flag. If equal to `null`, `short` must have a valid representation.
     long: ?[:0]const u8 = null,
+    /// The type of the flag. If equal to `void`, then the corresponding `struct` field will be a
+    /// boolean indicating whether this flag was found in the argument list.
+    type: type = void,
+    /// A default value for the flag.
+    default_value_ptr: ?*const anyopaque = null,
     /// A brief description of the flag's purpose and usage.
     help_msg: ?[]const u8 = null,
     /// A detailed string documenting the flag's purpose. For use within instances of a `--help=flag:<flag>` flag;
@@ -119,11 +125,6 @@ pub const Flag = struct {
     /// The name of the field representing the flag in the resulting flag `struct`. If `null`, the
     /// field name will be equal to the flag's long form, or the short form if no long form was provided.
     field_name: ?[:0]const u8 = null,
-    /// The type of the flag. If equal to `void`, then the corresponding `struct` field will be a
-    /// boolean indicating whether this flag was found in the argument list.
-    type: type = void,
-    /// A default value for the flag.
-    default_value_ptr: ?*const anyopaque = null,
     /// An alternative type name to display in place of a flag's type. For example, one might specify
     /// this to be `"PATH"` if a string argument should represent a filesystem path.
     alt_type_name: ?[:0]const u8 = null,
@@ -131,6 +132,25 @@ pub const Flag = struct {
     /// primary long or short form.
     /// TODO: implement flag aliases
     /// aliases: []const FlagAlias = &.{},
+    pub const Extra = struct {
+        info: ?[]const u8 = null,
+        field_name: ?[:0]const u8 = null,
+        alt_type_name: ?[:0]const u8 = null,
+    };
+
+    pub inline fn init(comptime T: type, short: ?u21, long: ?[:0]const u8, default_value: ?T, help_msg: ?[]const u8, extra: Extra) Flag {
+        return comptime .{
+            .short = short,
+            .long = long,
+            .type = T,
+            .default_value_ptr = if (default_value) |dv| @ptrCast(&@as(T, dv)) else null,
+            .help_msg = help_msg,
+            .info = extra.info,
+            .field_name = extra.field_name,
+            .alt_type_name = extra.alt_type_name,
+        };
+    }
+
     pub fn fieldName(flag: Flag) [:0]const u8 {
         return flag.field_name orelse (flag.long orelse std.fmt.comptimePrint("{u}", .{flag.short.?}));
     }
@@ -152,58 +172,45 @@ pub const Flag = struct {
     /// Returns a type string representing the flag's type. Will *not* append suffixes
     /// to an alternate type name if found, and will cause a compile error if `flag.type` is
     /// equal to `void`.
-    pub fn typeString(comptime flag: Flag, comptime ignore_alternate: bool) [:0]const u8 {
+    pub inline fn typeString(comptime flag: Flag, comptime ignore_alternate: bool) [:0]const u8 {
         return if (!ignore_alternate and flag.alt_type_name != null) flag.alt_type_name.? else {
             const check = struct {
                 fn func(comptime T: type) [:0]const u8 {
-                    if (comptime util.isCounter(T))
-                        return "COUNTER"
-                    else if (comptime util.isPair(T)) {
-                        const Result = @as(T, .{}).__argz_pair_result;
-                        const sep = @as(T, .{}).__argz_pair_separator;
-                        return comptime std.fmt.comptimePrint("{s}{u}{s}", .{ func(Result[0]), sep, func(Result[1]) });
-                    }
-                    if (comptime util.isBoundedMulti(T)) {
-                        const Child = @as(T, .{}).__argz_bmulti_child;
-                        if (comptime util.isPair(Child))
-                            return func(Child);
-                    } else if (comptime util.isDynamicMulti(T)) {
-                        const Child = @as(T, .{}).__argz_dmulti_child;
-                        if (comptime util.isPair(Child))
-                            return func(Child);
-                    }
-                    const Inner = switch (@typeInfo(T)) {
-                        .optional => |opt| opt.child,
-                        else => T,
-                    };
-                    return switch (@typeInfo(Inner)) {
-                        .void => @compileError("Flag.typeString requires a non-void type"),
-                        .int => "INTEGER",
-                        .float => "FLOAT",
-                        .bool => "BOOLEAN",
-                        .pointer => if (Inner == []const u8) "STRING" else switch (@typeInfo(Inner)) {
+                    return comptime switch (util.ArgzType.fromZigType(T)) {
+                        .counter => "COUNTER",
+                        .pair => |p| std.fmt.comptimePrint("{s}{u}{s}", .{ func(p.Lhs), p.separator, func(p.Rhs) }),
+                        .multi => |m| func(m.Child),
+                        .zig_primitive => |prim| switch (@typeInfo(prim)) {
+                            .void,
+                            => unreachable,
                             .int => "INTEGER",
-                            .float => "FLOAT",
+                            .float => "NUMBER",
                             .bool => "BOOLEAN",
-                            else => @compileError("invalid type for flag: '" ++ @typeName(flag.type) ++ "'"),
-                        } ++ "...",
-                        .array => |arr| switch (@typeInfo(arr.child)) {
-                            .int => "INTEGER",
-                            .float => "FLOAT",
-                            .bool => "BOOLEAN",
-                            .pointer => if (arr.child == []const u8) "STRING" else @compileError("invalid type for flag"),
-                            else => @compileError("invalid type for flag: '" ++ @typeName(flag.type) ++ "'"),
-                        } ++ std.fmt.comptimePrint("[{d}]", .{arr.len}),
-                        .@"enum" => |info| blk: {
-                            if (info.fields.len == 0)
-                                @compileError("empty enums are not supported");
-                            comptime var string = info.fields[0].name;
-                            inline for (info.fields[1..]) |field| {
-                                string = string ++ "|" ++ field.name;
-                            }
-                            break :blk string;
+                            .pointer => |ptr| if (ptr.child == u8 and ptr.is_const)
+                                if (ptr.sentinel()) |sentinel|
+                                    "STRING \\ " ++ if (sentinel >= 32 and sentinel <= 127) .{sentinel} else std.fmt.comptimePrint("{d}", .{sentinel})
+                                else
+                                    "STRING"
+                            else
+                                func(ptr.child) ++ "...",
+                            .array => |arr| func(arr.child) ++ "[" ++ (if (@typeInfo(arr.child) == .optional) "<=" else "") ++ std.fmt.comptimePrint("{d}", .{arr.len}) ++ "]",
+                            .@"enum" => |info| blk: {
+                                var string: [:0]const u8 = "{" ++ info.fields[0].name;
+                                for (info.fields[1..]) |field| {
+                                    string = string ++ "|" ++ field.name;
+                                }
+                                string = string ++ "}";
+                                break :blk if (string.len < 60)
+                                    string
+                                else
+                                    // string will likely contribute to a line longer than the terminal width
+                                    T;
+                            },
+                            .optional => |info| func(info.child),
+                            else => unreachable,
                         },
-                        else => @compileError("invalid type for flag: '" ++ @typeName(flag.type) ++ "'"),
+                        .trailing => unreachable,
+                        .flag_help => unreachable,
                     };
                 }
             }.func;
@@ -211,7 +218,7 @@ pub const Flag = struct {
         };
     }
 
-    pub fn flagString(comptime flag: Flag, variant: util.FlagType) [:0]const u8 {
+    pub inline fn flagString(comptime flag: Flag, variant: util.FlagType) [:0]const u8 {
         return switch (variant) {
             .long => "--" ++ (flag.long orelse unreachable),
             .short => std.fmt.comptimePrint("-{u}", .{flag.short orelse unreachable}),
@@ -240,8 +247,8 @@ pub const Positional = struct {
     /// The positional's type. Can *not* be `void`. May be an optional value if and only if all successive positionals are optional.
     ///
     /// Optionally, the very last positional in a positional list may have the type [Trailing], which will collect every string after
-    /// a force-stop sequence (`"--"`). The actual type of the positional will be `[]const [:0]const u8`, which will point
-    /// to the strings in the arguments passed to the parser.
+    /// a force-stop sequence (`"--"`). The actual type of the positional will be [TrailingPositionals], which will reference
+    /// the strings in the arguments passed to the parser.
     type: type,
     /// A help string describing the positional argument's use.
     help_msg: ?[]const u8 = null,
@@ -273,12 +280,19 @@ pub fn Counter(comptime T: type) type {
     };
 }
 
-pub fn BoundedMulti(comptime T: type, comptime max_elems: usize) type {
-    return @TypeOf(.{ .__argz_bmulti_child = T, .__argz_bmulti_len = max_elems });
-}
+pub const MultiStorage = union(enum) {
+    /// Value is the maximum number of elements that can be parsed.
+    bounded: usize,
+    dynamic,
+};
 
-pub fn DynamicMulti(comptime T: type) type {
-    return @TypeOf(.{ .__argz_dmulti_child = T, .__argz_dmulti_backing_type = std.ArrayListUnmanaged(@import("Parser.zig").ResolveType(T)) });
+pub fn Multi(comptime T: type, _storage: MultiStorage) type {
+    return struct {
+        pub const argz_multi_tag = {};
+
+        pub const Child = T;
+        pub const storage = _storage;
+    };
 }
 
 pub const TrailingPositionals = struct {

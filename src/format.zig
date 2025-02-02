@@ -129,24 +129,48 @@ pub fn formatFlagDefault(
         try writer.writeAll(" " ** (flag_padding - total_written + 1) ++ " " ** flag_type_padding ++ help);
     }
     if (flag.type != void and flag.type != argz.FlagHelp) {
-        if (flag.default_value_ptr) |default| {
-            // FIXME: this ugly code is needed to properly coerce things like `enum`s. It can
-            // probably be written in a less ugly way.
-            var tmp: flag.type = undefined;
-            @memcpy(@as(*[1]flag.type, &tmp), @as(*const [1]flag.type, @ptrCast(@alignCast(default))));
-            if (@typeInfo(flag.type) == .@"enum")
-                try writer.print(" (default '{s}')", .{@tagName(tmp)})
-            else if (flag.type == []const u8) {
-                const ptr = @as([*:0]const u8, @ptrCast(default));
-                comptime var len = 0;
-                inline while (ptr[len] != 0) : (len += 1) {}
-                try writer.print(" (default '{s}')", .{ptr[0..len]});
-            } else {
-                try writer.print(" (default '{any}')", .{tmp});
-            }
+        if (flag.defaultValue()) |default| {
+            try writer.writeAll(" (default ");
+            try formatValue(default, writer);
+            try writer.writeByte(')');
         }
     }
     try writer.writeByte('\n');
+}
+
+fn formatValue(value: anytype, writer: anytype) !void {
+    switch (@typeInfo(@TypeOf(value))) {
+        .array => |arr| {
+            try writer.writeByte('[');
+            for (0.., &value) |i, itm| {
+                if (@typeInfo(arr.child) == .optional)
+                    if (itm == null)
+                        break;
+                try formatValue(itm, writer);
+                if (i + 1 != arr.len) {
+                    try writer.writeAll(", ");
+                }
+            }
+            try writer.writeByte(']');
+        },
+        .pointer => switch (@TypeOf(value)) {
+            []const u8, [:0]const u8 => try writer.print("\"{s}\"", .{value}),
+            else => {
+                try writer.writeByte('[');
+                for (0.., value) |i, itm| {
+                    try formatValue(itm, writer);
+                    if (i + 1 != value.len) {
+                        try writer.writeAll(", ");
+                    }
+                }
+                try writer.writeByte(']');
+            },
+        },
+        .int, .float => try writer.print("{d}", .{value}),
+        .@"enum" => try writer.print("{s}", .{@tagName(value)}),
+        .optional => if (value) |v| try formatValue(v, writer) else try writer.writeAll("null"),
+        else => try writer.print("{s} {any}", .{ @TypeOf(value), value }),
+    }
 }
 
 pub fn formatAllCommandsDefault(
@@ -222,7 +246,7 @@ pub fn formatPrologueDefault(
         break :blk result;
     };
     try writer.print("{s} {s}{s}", .{
-        ansi.ansiFormatter("Usage", emit_ansi_codes, .green, .bold),
+        ansi.ansiFormatter("Usage:", emit_ansi_codes, .green, .bold),
         ansi.ansiFormatter(program_name, emit_ansi_codes, .blue, .bold),
         ansi.ansiFormatter(cmd_string, emit_ansi_codes, .blue, .bold),
     });

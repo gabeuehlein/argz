@@ -62,16 +62,24 @@ pub const ArgIndex = enum(usize) {
 pub const FlagIndex = enum(usize) {
     _,
 
-    pub fn get(comptime idx: FlagIndex, comptime flags: []const Flag) Flag {
-        return flags[@intFromEnum(idx)];
+    pub fn get(idx: FlagIndex, comptime flags: []const Flag) Flag {
+        comptime assert(flags.len != 0);
+        return switch (@intFromEnum(idx)) {
+            inline 0...flags.len - 1 => |i| flags[i],
+            else => unreachable,
+        };
     }
 };
 
 pub const CommandIndex = enum(usize) {
     _,
 
-    pub fn get(comptime idx: CommandIndex, comptime commands: []const Command) Command {
-        return commands[@intFromEnum(idx)];
+    pub fn get(idx: CommandIndex, comptime commands: []const Command) Command {
+        comptime assert(commands.len != 0);
+        return switch (@intFromEnum(idx)) {
+            inline 0...commands.len - 1 => |i| commands[i],
+            else => unreachable,
+        };
     }
 };
 
@@ -351,16 +359,11 @@ fn longFlag(lexer: *Lexer, comptime flags: []const Flag, arg: []const u8) Token 
     lexer.subargi = 0;
 
     const flag_end = std.mem.indexOfScalar(u8, arg, '=');
-    var found = false;
-    defer {
-        if (found)
-            _ = lexer.loadNextArg();
-    }
 
     inline for (flags, 0..) |flag, i| {
         if (flag.long) |long| {
             if (std.mem.eql(u8, long, arg[2 .. flag_end orelse arg.len])) {
-                found = true;
+                defer _ = lexer.loadNextArg();
                 if (flag.type == argz.FlagHelp)
                     return if (flag_end) |eq_idx| .{ .long_flag_with_value = .{
                         .index = @enumFromInt(i),
@@ -384,6 +387,21 @@ fn longFlag(lexer: *Lexer, comptime flags: []const Flag, arg: []const u8) Token 
                     } } else .{ .long_flag = .{
                         .index = @enumFromInt(i),
                     } },
+                    .array => |arr| if (@typeInfo(arr.child) == .optional) {
+                        return if (flag_end) |eq_idx| .{ .long_flag_with_value = .{
+                            .index = @enumFromInt(i),
+                            .value_span = Span{
+                                .argv_index = @enumFromInt(lexer.argi),
+                                .start = eq_idx + 1,
+                                .end = arg.len,
+                            },
+                        } } else blk: {
+                            if (!lexer.loadNextArg())
+                                break :blk .{ .long_flag = .{ .index = @enumFromInt(i) } };
+                            const next_arg = lexer.currentArg().?;
+                            break :blk .{ .long_flag_with_value = .{ .index = @enumFromInt(i), .value_span = Span{ .argv_index = @enumFromInt(lexer.argi), .start = 0, .end = next_arg.len } } };
+                        };
+                    },
                     else => return if (flag_end) |eq_idx| .{ .long_flag_with_value = .{
                         .index = @enumFromInt(i),
                         .value_span = Span{
@@ -409,12 +427,13 @@ fn longFlag(lexer: *Lexer, comptime flags: []const Flag, arg: []const u8) Token 
 }
 
 fn loadNextArg(lexer: *Lexer) bool {
-    if (lexer.argi < lexer.args.len) {
-        lexer.argi += 1;
-        lexer.subargi = 0;
-        return true;
-    }
-    return false;
+    if (lexer.argi >= lexer.args.len)
+        return false;
+    lexer.argi += 1;
+    if (lexer.argi >= lexer.args.len)
+        return false;
+    lexer.subargi = 0;
+    return true;
 }
 
 fn peek(lexer: *const Lexer) ?u21 {
@@ -436,7 +455,7 @@ fn maybe(lexer: *Lexer, char: u21) bool {
 }
 
 fn currentArg(lexer: *const Lexer) ?[]const u8 {
-    return if (lexer.argi < lexer.args.len) lexer.args.get(lexer.argi) else null;
+    return if (lexer.argi >= lexer.args.len) null else lexer.args.get(lexer.argi);
 }
 
 fn decodeCharAtArgPos(arg: []const u8, pos: usize) struct { u3, u21 } {

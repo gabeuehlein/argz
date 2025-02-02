@@ -29,20 +29,9 @@ const cfg = argz.Config{
                 },
             } },
             .flags = &.{
-                Flag{
-                    .long = "recurse-submodules",
-                    .type = void,
-                    .help_msg = "recursively clone submodules",
-                    .field_name = "recurse_submodules",
-                    .default_value_ptr = &@as(bool, false),
-                },
-                Flag{
-                    .long = "help",
-                    .short = 'h',
-                    .help_msg = "show this help",
-                    .field_name = "__help",
-                    .type = argz.FlagHelp 
-                }
+                .init(void, null, "recurse-submodules", {}, "recursively clone submodules", .{}),
+                .help,
+                .init([]const u8, 'f', "foobar", "default flag value", "this is a flag", .{}),
             },
         },
     } },

@@ -65,15 +65,18 @@ pub fn parseStaticValue(comptime T: type, string: []const u8) !ParseStaticValueR
             .int => result = try fmt.parseInt(prim, string, 0),
             .float => result = try fmt.parseFloat(prim, string),
             .array => |arr| {
+                var tmp: [arr.len]arr.child = if (@typeInfo(arr.child) == .optional) @splat(null) else undefined;
                 var split = std.mem.splitScalar(u8, string, ',');
                 var i: usize = 0;
+                const is_optional = @typeInfo(arr.child) == .optional;
                 while (split.next()) |elem| : (i += 1) {
-                    if (i > arr.len)
+                    if (i >= arr.len)
                         return error.TooManyElements;
-                    result[i] = try parseStaticValue(arr.child, elem);
+                    tmp[i] = try parseStaticValue(if (is_optional) @typeInfo(arr.child).optional.child else arr.child, elem);
                 }
-                if (i != arr.len)
+                if (!is_optional and i != arr.len)
                     return error.TooFewElements;
+                result = tmp;
             },
             .pointer => {
                 comptime assert(prim == []const u8);
@@ -137,6 +140,8 @@ pub fn parseDynamicValue(comptime T: type, allocator: std.mem.Allocator, string:
                 if (ptr.is_const and ptr.child == u8) {
                     // string, maybe sentinel-terminated
                     if (ptr.sentinel()) |sentinel| {
+                        if (std.mem.indexOfScalar(u8, string, sentinel) != null)
+                            return error.InvalidCharacter;
                         const buf = try allocator.allocSentinel(u8, string.len, sentinel);
                         @memcpy(buf, string);
                         result = buf;
