@@ -78,6 +78,18 @@ fn TypeFromFlags(comptime flags: []const Flag, comptime support_allocation: bool
     return @Type(.{ .@"struct" = .{ .fields = &fields, .layout = .auto, .decls = &.{}, .is_tuple = false } });
 }
 
+inline fn requiredFlagsBitSet(comptime flags: []const Flag) std.StaticBitSet(flags.len) {
+    comptime {
+        var result: std.StaticBitSet(flags.len) = .initEmpty();
+        for (0.., flags) |i, flag| {
+            if (!(flag.type == void or flag.type == argz.FlagHelp or util.isCounter(flag.type) or util.isMulti(flag.type) or flag.default_value_ptr != null)) {
+                result.set(i);
+            }
+        }
+        return result;
+    }
+}
+
 fn TypeFromMode(comptime mode: Mode, comptime support_allocation: bool) type {
     assert(@inComptime());
     @setEvalBranchQuota(5000000);
@@ -93,7 +105,7 @@ fn TypeFromMode(comptime mode: Mode, comptime support_allocation: bool) type {
                     .value = i,
                 };
                 union_fields[i] = Type.UnionField{ .name = cmd.fieldName(), .type = switch (cmd.mode) {
-                    .standard => struct { positionals: TypeFromMode(cmd.mode, support_allocation), flags: TypeFromFlags(cmd.flags, support_allocation) },
+                    .positionals => struct { positionals: TypeFromMode(cmd.mode, support_allocation), flags: TypeFromFlags(cmd.flags, support_allocation) },
                     .commands => struct { command: TypeFromMode(cmd.mode, support_allocation), flags: TypeFromFlags(cmd.flags, support_allocation) },
                 }, .alignment = 0 };
             }
@@ -111,7 +123,7 @@ fn TypeFromMode(comptime mode: Mode, comptime support_allocation: bool) type {
                 .decls = &.{},
             } });
         },
-        .standard => |positionals| {
+        .positionals => |positionals| {
             var struct_fields = @as([positionals.len]Type.StructField, undefined);
             if (positionals.len != 0) {
                 const last = positionals[positionals.len - 1];
@@ -379,26 +391,27 @@ fn ArgParser(comptime cfg: argz.Config) type {
             const Flags = TypeFromFlags(flags, cfg.support_allocation);
             return switch (mode) {
                 .commands => struct { command: ModeData, flags: Flags },
-                .standard => struct { positionals: ModeData, flags: Flags },
+                .positionals => struct { positionals: ModeData, flags: Flags },
             };
         }
 
         pub fn parseInner(self: *Self, comptime mode_or_cmd: anytype, comptime flags: []const Flag, comptime cmd_stack: []const Command) ParseError!ParseInnerReturnType(mode_or_cmd, flags) {
             const mode = if (@TypeOf(mode_or_cmd) == Command) mode_or_cmd.mode else mode_or_cmd;
             const has_trailing_positionals = comptime switch (mode) {
-                .standard => |positionals| positionals.len != 0 and positionals[positionals.len - 1].type == argz.Trailing,
+                .positionals => |positionals| positionals.len != 0 and positionals[positionals.len - 1].type == argz.Trailing,
                 .commands => false,
             };
             const has_variadic_positional = comptime switch (mode) {
-                .standard => |positionals| positionals.len > @intFromBool(has_trailing_positionals) and positionals[positionals.len - 1 - @intFromBool(has_trailing_positionals)].type == argz.Trailing,
+                .positionals => |positionals| positionals.len > @intFromBool(has_trailing_positionals) and positionals[positionals.len - 1 - @intFromBool(has_trailing_positionals)].type == argz.Trailing,
                 .commands => false,
             };
+            const required_flags = requiredFlagsBitSet(flags);
             var found_trailing_positionals = false;
             var result = @as(ParseInnerReturnType(mode_or_cmd, flags), undefined);
             var flags_set = std.StaticBitSet(flags.len).initEmpty();
             var found_command = false;
             var variadic_positional_state = comptime switch (mode) {
-                .standard => |positionals| if (positionals.len == 0 or !util.ArgzType.fromZigType(positionals[positionals.len - 1 - @intFromBool(has_trailing_positionals)].type).requiresAllocator())
+                .positionals => |positionals| if (positionals.len == 0 or !util.ArgzType.fromZigType(positionals[positionals.len - 1 - @intFromBool(has_trailing_positionals)].type).requiresAllocator())
                     std.ArrayListUnmanaged(void).empty
                 else
                     std.ArrayListUnmanaged(@typeInfo(positionals[positionals.len - 1 - @intFromBool(has_trailing_positionals)].type).pointer.child).empty,
@@ -426,7 +439,7 @@ fn ArgParser(comptime cfg: argz.Config) type {
                 }
             }.dbg;
             top: while (self.lexer.nextToken(flags, switch (mode) {
-                .standard => .positionals,
+                .positionals => .positionals,
                 .commands => |cmds| .{ .commands = .{ .commands = cmds, .default = null } },
             })) |tok| {
                 found_token = true;
@@ -446,15 +459,15 @@ fn ArgParser(comptime cfg: argz.Config) type {
                         else => unreachable,
                     },
                     .force_stop => if (has_trailing_positionals) {
-                        if (mode.standard.len == 0)
+                        if (mode.positionals.len == 0)
                             return self.fail("unexpected force stop found", .{});
                         switch (self.positional_index) {
-                            inline 0...@max(1, mode.standard.len) - 1 => |idx| {
-                                const pos = mode.standard[idx];
+                            inline 0...@max(1, mode.positionals.len) - 1 => |idx| {
+                                const pos = mode.positionals[idx];
                                 if (pos.type != argz.Trailing) {
                                     switch (@typeInfo(pos.type)) {
                                         .optional, .pointer => {
-                                            self.positional_index = mode.standard.len - 1;
+                                            self.positional_index = mode.positionals.len - 1;
                                         },
                                         else => return self.fail("unexpected force stop found", .{}),
                                     }
@@ -464,10 +477,10 @@ fn ArgParser(comptime cfg: argz.Config) type {
                         }
                     },
                     .positional => |index| {
-                        if (mode != .standard)
+                        if (mode != .positionals)
                             unreachable;
                         const arg = index.argv_index.get(self.lexer.args);
-                        const positionals = mode.standard;
+                        const positionals = mode.positionals;
                         if (positionals.len == 0)
                             return self.fail("unexpected positional argument found: '{s}'", .{arg});
                         switch (self.positional_index) {
@@ -497,14 +510,14 @@ fn ArgParser(comptime cfg: argz.Config) type {
                         }
                     },
                     .command => |index| {
-                        if (comptime mode == .standard)
+                        if (comptime mode == .positionals)
                             unreachable;
                         switch (mode) {
-                            .standard => unreachable,
+                            .positionals => unreachable,
                             .commands => |cmds| switch (@intFromEnum(index.index)) {
                                 inline 0...@max(1, cmds.len) - 1 => |idx| {
                                     if (comptime cmds[idx].is_help) {
-                                        comptime assert(cmds[idx].mode == .standard and cmds[idx].mode.standard.len == 0);
+                                        comptime assert(cmds[idx].mode == .positionals and cmds[idx].mode.positionals.len == 0);
                                         var stdout = std.io.getStdOut();
                                         const stdoutw = stdout.writer();
                                         try self.writeHelpFull(stdoutw, self.stdout_supports_ansi, flags, cmd_stack, mode);
@@ -515,7 +528,7 @@ fn ArgParser(comptime cfg: argz.Config) type {
                                     // this hack isn't needed.
                                     const data = try self.parseInner(cmds[idx].mode, cmds[idx].flags, cmd_stack ++ .{cmds[idx]});
                                     result.command = @unionInit(@TypeOf(result.command), cmds[idx].fieldName(), switch (cmds[idx].mode) {
-                                        .standard => .{ .positionals = data.positionals, .flags = data.flags },
+                                        .positionals => .{ .positionals = data.positionals, .flags = data.flags },
                                         .commands => .{ .command = data.command, .flags = data.flags },
                                     });
                                     found_command = true;
@@ -527,30 +540,33 @@ fn ArgParser(comptime cfg: argz.Config) type {
                 }
             }
             if (!found_token) {
-                var stdout = std.io.getStdOut();
-                const stdoutw = stdout.writer();
-                var buf_writer = std.io.bufferedWriter(stdoutw);
-                const real_writer = buf_writer.writer();
-                self.writeHelpFull(real_writer, self.stdout_supports_ansi, flags, cmd_stack, mode) catch {};
-                buf_writer.flush() catch {};
-                std.process.exit(0);
-            }
-            switch (mode) {
-                .standard => |positionals| {
-                    if (comptime positionals.len != 0) {
-                        const last_idx = positionals.len - 1 - @intFromBool(has_variadic_positional) - @intFromBool(has_trailing_positionals);
-                        if (self.positional_index < last_idx)
-                            return self.fail("too few positional arguments found", .{});
-                        const maybe_variadic_pos = positionals[positionals.len - 1 - @intFromBool(has_trailing_positionals)];
-                        if (comptime maybe_variadic_pos.type != []const u8 and @typeInfo(maybe_variadic_pos.type) == .pointer) {
-                            @field(result.positionals, maybe_variadic_pos.fieldName()) = try variadic_positional_state.toOwnedSlice(self.allocator);
+                if (required_flags.count() != 0) {
+                    var stdout = std.io.getStdOut();
+                    const stdoutw = stdout.writer();
+                    var buf_writer = std.io.bufferedWriter(stdoutw);
+                    const real_writer = buf_writer.writer();
+                    self.writeHelpFull(real_writer, self.stdout_supports_ansi, flags, cmd_stack, mode) catch {};
+                    buf_writer.flush() catch {};
+                    std.process.exit(0);
+                }
+            } else {
+                switch (mode) {
+                    .positionals => |positionals| {
+                        if (comptime positionals.len != 0) {
+                            const last_idx = positionals.len - 1 - @intFromBool(has_variadic_positional) - @intFromBool(has_trailing_positionals);
+                            if (self.positional_index < last_idx)
+                                return self.fail("too few positional arguments found", .{});
+                            const maybe_variadic_pos = positionals[positionals.len - 1 - @intFromBool(has_trailing_positionals)];
+                            if (comptime maybe_variadic_pos.type != []const u8 and @typeInfo(maybe_variadic_pos.type) == .pointer) {
+                                @field(result.positionals, maybe_variadic_pos.fieldName()) = try variadic_positional_state.toOwnedSlice(self.allocator);
+                            }
+                            const maybe_trailing_pos = positionals[positionals.len - 1];
+                            if (!found_trailing_positionals and maybe_trailing_pos.type == argz.Trailing)
+                                @field(result.positionals, maybe_trailing_pos.fieldName()) = TrailingPositionals.init(.empty, 0);
                         }
-                        const maybe_trailing_pos = positionals[positionals.len - 1];
-                        if (!found_trailing_positionals and maybe_trailing_pos.type == argz.Trailing)
-                            @field(result.positionals, maybe_trailing_pos.fieldName()) = TrailingPositionals.init(.empty, 0);
-                    }
-                },
-                .commands => if (!found_command) return self.fail("no command provided", .{}),
+                    },
+                    .commands => if (!found_command) return self.fail("no command provided", .{}),
+                }
             }
             inline for (0..flags.len) |i| {
                 if (!flags_set.isSet(i)) {
@@ -566,6 +582,47 @@ fn ArgParser(comptime cfg: argz.Config) type {
                 }
             }
             return result;
+        }
+
+        pub fn deinitOptions(self: *@This(), opts: Options) void {
+            if (!cfg.support_allocation) return;
+            inline for (cfg.top_level_flags) |flag| {
+                if (flag.hasDynamicValue())
+                    values.freeExt(self.allocator, @field(opts, flag.fieldName()));
+            }
+            freeMode(self.allocator, cfg.mode, switch (cfg.mode) {
+                .commands => opts.command,
+                .positionals => opts.positionals,
+            });
+        }
+
+        fn freeMode(allocator: Allocator, mode: Mode, val: anytype) void {
+            switch (mode) {
+                .commands => |cmds| {
+                    const Tag = std.meta.Tag(val);
+                    inline for (cmds) |cmd| {
+                        const tag = @field(Tag, cmd.fieldName());
+                        if (tag == @as(Tag, val)) {
+                            const data = @field(val, cmd.fieldName());
+                            inline for (cmd.flags) |flag| {
+                                if (flag.hasDynamicValue())
+                                    values.freeExt(allocator, @field(data.flags, flag.fieldName()));
+                            }
+                            freeMode(allocator, data.mode, switch (data.mode) {
+                                .commands => data.command,
+                                .positionals => data.positionals,
+                            });
+                        }
+                    }
+                },
+                .positionals => |positionals| {
+                    inline for (positionals) |positional| {
+                        if (util.ArgzType.fromZigType(positional.type).requiresAllocator()) {
+                            values.freeExt(allocator, @field(val, positional.fieldName()));
+                        }
+                    }
+                },
+            }
         }
 
         pub fn parse(self: *@This()) !Options {
@@ -590,7 +647,7 @@ fn ArgParser(comptime cfg: argz.Config) type {
                 writer,
             );
             switch (mode) {
-                .standard => {},
+                .positionals => {},
                 .commands => |commands| {
                     try cfg.formatters.commands(commands, use_ansi, writer);
                 },

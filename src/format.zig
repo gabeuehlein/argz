@@ -76,7 +76,7 @@ pub fn formatAllFlagsDefault(
             if (flag.type != void and flag.type != argz.FlagHelp) {
                 max_flag_type_pad = @max(
                     max_flag_type_pad,
-                    (std.unicode.utf8CountCodepoints(flag.typeString(true)) catch unreachable) +
+                    1 + (std.unicode.utf8CountCodepoints(flag.typeString(false)) catch unreachable) +
                         @intFromBool(@typeInfo(flag.type) == .optional) + 2,
                 );
             }
@@ -253,7 +253,7 @@ pub fn formatPrologueDefault(
     if (current_flags.len != 0)
         try writer.print(" {s}", .{ansi.ansiFormatter("[FLAGS]", emit_ansi_codes, .cyan, .bold)});
     switch (current_mode) {
-        .standard => |positionals| {
+        .positionals => |positionals| {
             comptime var num_optional_positionals = 0;
             inline for (positionals) |positional| {
                 if (positional.type == argz.Trailing) break;
@@ -304,10 +304,10 @@ pub fn formatExpandedHelpDefault(
                 }
                 return error.UnknownHelpTopic;
             },
-            .standard => return error.DifferentModeActive,
+            .positionals => return error.DifferentModeActive,
         },
         .positional, .pos => switch (mode) {
-            .standard => |positionals| {
+            .positionals => |positionals| {
                 inline for (positionals) |pos| {
                     if (std.mem.eql(u8, pos.displayString(), help_topic)) {
                         const help = pos.info orelse (pos.help_msg orelse return error.NoHelpAvailable);

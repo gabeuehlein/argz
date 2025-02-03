@@ -9,10 +9,10 @@ const Operator = enum {
 };
 
 const config: argz.Config = .{
-    .mode = .{ .standard = &.{} },
+    .mode = .{ .positionals = &.{} },
     .top_level_flags = &.{
         .help,
-        .init([4]?Operator, null, "operators", .{ .add, .sub, .mul, .div }, "a list of arithmetic operators to make questions with", .{}),
+        .init([4]?Operator, null, "operators", .{ .add, .sub, .mul, .div }, "a list of arithmetic operators to make questions with", .{ .alt_type_name = "OPERATOR" }),
         .init(i32, null, "min", -10, "the smallest number that a question can have", .{}),
         .init(i32, null, "max", 10, "the largest number that a question can have", .{}),
         .init(u32, 'n', "num-questions", 20, "the number of questions to ask", .{}),
@@ -46,7 +46,7 @@ pub fn main() !void {
     var question_no: u32 = 1;
     var question_input: [4096]u8 = undefined;
     while (question_no <= args.flags.@"num-questions") : (question_no += 1) {
-        const index = rng.intRangeAtMost(usize, 0, null_index);
+        const index = rng.intRangeAtMost(usize, 0, null_index - 1);
         const op = ops[index].?;
         const a = rng.intRangeAtMost(i32, args.flags.min, args.flags.max);
         const b = rng.intRangeAtMost(i32, args.flags.min, args.flags.max);
@@ -56,7 +56,7 @@ pub fn main() !void {
             .mul => "*",
             .div => "/",
         }, b });
-        const answer = in.readUntilDelimiter(&question_input, '\n') catch |e| p.fatal("couldn't read answer: {s}\n", .{@errorName(e)});
+        const answer = in.readUntilDelimiterOrEof(&question_input, '\n') catch |e| p.fatal("couldn't read answer: {s}\n", .{@errorName(e)}) orelse break;
         if (b == 0 and op == .div) {
             if (std.ascii.eqlIgnoreCase(answer, "undefined"))
                 try out.writeAll("Correct!\n")

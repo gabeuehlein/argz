@@ -1,6 +1,13 @@
 ## argz
 
-`argz` is a Zig library that provides utilities for parsing command line arguments. It is based on `comptime` generation of a parser for a given configuration, which means that parsing your arguments using `argz` does not require an allocator. However parsing dynamically-sized values (e.g. slices) with an allocator *is* supported if required.
+> [!NOTE]
+> While `argz` will generally function for some CLIs, note that
+> it is not well tested and as such more esoteric configurations
+> may not function properly.
+
+`argz` is a Zig library that provides utilities for parsing command line arguments.
+It is based on `comptime` generation of a parser for a given configuration, which means that parsing your arguments using `argz` does not require an allocator.
+However parsing dynamically-sized values (e.g. slices) with an allocator *is* supported if required.
 
 ## Features
 

@@ -6,22 +6,13 @@ const Flag = argz.Flag;
 
 // zig fmt: off
 const cfg = argz.Config{
-    .top_level_flags = &[_]Flag{
-        .{ .short = 'h', .long = "help", .type = argz.FlagHelp, .field_name = "help", .help_msg = "show this help",
-    .info = 
-\\ Shows a help message. You can also provide an argument containing
-\\ a category and topic separated by a colon (':'). That's how you're
-\\ reading this message!
-\\
-\\ Example usage is as follows:
-\\     <program> --help=flag:help
-\\ Here 'flag' is the category and 'help' is the topic.
-\\ Other categories include 'cmd', 'command', 'pos', 'and positional'.
-,},
+    .top_level_flags = &.{
+        .help,
+        .init(void, 'e', "stderr", null, "output to standard error instead of standard out", .{}),
     },
-    .mode = .{ .standard = &[_]Positional{
+    .mode = .{ .positionals = &.{
         Positional{
-            .type = [][]const u8,
+            .type = [][:0]const u8,
             .display = "ARGS",
             .help_msg = "the arguments to print",
             .field_name = "args"
@@ -34,18 +25,19 @@ const cfg = argz.Config{
 // zig fmt: on
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{ .safety = false, .retain_metadata = false }){};
-    const gpa_allocator = gpa.allocator();
-    defer std.debug.assert(!gpa.detectLeaks());
-    var arena = std.heap.ArenaAllocator.init(gpa_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
     var argv = argz.SystemArgs.init();
-    var parser = argz.argParser(cfg, argv.args(), allocator) catch unreachable;
+    var parser = try argz.argParser(cfg, argv.args(), allocator);
     const opts = try parser.parse();
-    var stdout = std.io.getStdOut();
-    for (opts.positionals.args) |arg| {
-        try stdout.writer().print("{s}\n", .{arg});
-    }
+    defer parser.deinitOptions(opts);
+    var out = if (opts.flags.stderr)
+        std.io.getStdErr()
+    else
+        std.io.getStdOut();
+
+    for (opts.positionals.args) |arg|
+        try out.writer().print("{s}\n", .{arg});
 }

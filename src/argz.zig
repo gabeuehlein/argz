@@ -25,7 +25,7 @@ pub const Mode = union(enum(u1)) {
     /// A "standard" interface. Only allows positional arguments on top of any flags specified in
     /// its respective configuration environment. This is allowed in both the root [Config](argz.Config)
     /// and [Commands](argz.Command) nested at any level.
-    standard: []const Positional,
+    positionals: []const Positional,
 };
 
 pub const Config = struct {
@@ -51,12 +51,12 @@ pub const Config = struct {
     /// The top-level [Mode](argz.Mode) for the CLI. This determines whether a project
     /// is command-based or flag-based.
     mode: Mode,
-    /// Whether to support dynamic memory allocation. If `true`, variable length slices and sentinel-terminated
+    /// Whether to support dynamic memory allocation. If `true`, variable length slices and non-zero sentinel terminated
     /// strings become legal as option types. It is the programmer's responsibility to free them when no longer needed.
     ///
     /// Note that slices are to be passed as comma-separated strings containing the data to be parsed. There is currently
     /// no way to escape commas in slices of strings. Each application must implement their own way of doing so themselves.
-    support_allocation: bool,
+    support_allocation: bool = false,
     formatters: struct {
         flags: fmt.AllFlagsFormatFn = fmt.formatAllFlagsDefault,
         commands: fmt.AllCommandsFormatFn = fmt.formatAllCommandsDefault,
@@ -68,23 +68,59 @@ pub const Config = struct {
 pub const Command = struct {
     /// The textual representation of the command.
     cmd: [:0]const u8,
-    field_name: ?[:0]const u8 = null,
-    /// A brief help message describing the command's usage. Use `info` to provide
-    /// a more in-depth help message.
-    help_msg: ?[]const u8 = null,
     /// Custom flags for the command. Any prior flags will *not* be parsed.
-    flags: []const Flag = &.{},
-    /// The parsing [Mode](argz.Mode) for this command. `.standard` should be used for bottom-level
+    flags: []const Flag,
+    /// The parsing [Mode](argz.Mode) for this command. `.positionals` should be used for bottom-level
     /// commands, i.e. those which should perform a particular action. `.commands` should be used to
     /// to group clusters of related actions.
     mode: Mode,
+    /// A brief help message describing the command's usage. Use `info` to provide
+    /// a more in-depth help message.
+    help_msg: ?[]const u8,
+    /// An override for the default field name of the command.
+    field_name: ?[:0]const u8,
     /// Whether to designate this flag as a help command. Note that multiple such help commands can
     /// exist in one set of commands, and it is not checked that there is at most one help command.
-    is_help: bool = false,
+    is_help: bool,
     /// A detailed string documenting the command's purpose. For use within instances of a `--help=cmd:<command>` flag;
-    info: ?[]const u8 = null,
+    info: ?[]const u8,
     // TODO: implement command aliases
-    aliases: []const [:0]const u8 = &.{},
+    // aliases: []const [:0]const u8 = &.{},
+
+    pub const Extra = struct {
+        field_name: ?[:0]const u8 = null,
+        is_help: bool = false,
+        info: ?[]const u8 = null,
+    };
+
+    pub const help: Command = .init("help", &.{}, .{ .positionals = &.{} }, "show this help", .{
+        .is_help = true,
+        .info =
+        \\ The 'help' command displays help regarding program usage
+        \\ and exits the program gracefully.
+        ,
+    });
+
+    pub inline fn init(cmd: [:0]const u8, flags: []const Flag, mode: Mode, help_msg: ?[]const u8, extra: Extra) Command {
+        if (extra.is_help) {
+            if (flags.len != 0)
+                @compileError("help command must not have any flags");
+            switch (mode) {
+                .positionals => |positionals| if (positionals.len != 0)
+                    @compileError("help command must not have any positional arguments"),
+                .commands => @compileError("help command must have a Mode of '.positionals'"),
+            }
+        }
+        return comptime .{
+            .cmd = cmd,
+            .flags = flags,
+            .mode = mode,
+            .help_msg = help_msg,
+            .field_name = extra.field_name,
+            .is_help = extra.is_help,
+            .info = extra.info,
+        };
+    }
 
     pub fn fieldName(cmd: Command) [:0]const u8 {
         return cmd.field_name orelse cmd.cmd;
@@ -103,39 +139,39 @@ pub fn Pair(comptime First: type, comptime Second: type, comptime _separator: u2
 
 /// TODO: implement flag aliases and then make
 /// this public
-const FlagAlias = union(enum) {
-    long: ?[:0]const u8,
-    short: ?u21,
-};
-
 pub const Flag = struct {
     /// The short form of the flag. If equal to `null`, `long` must have a valid representation.
-    short: ?u21 = null,
+    short: ?u21,
     /// The long form of the flag. If equal to `null`, `short` must have a valid representation.
-    long: ?[:0]const u8 = null,
+    long: ?[:0]const u8,
     /// The type of the flag. If equal to `void`, then the corresponding `struct` field will be a
     /// boolean indicating whether this flag was found in the argument list.
-    type: type = void,
+    type: type,
     /// A default value for the flag.
-    default_value_ptr: ?*const anyopaque = null,
+    default_value_ptr: ?*const anyopaque,
     /// A brief description of the flag's purpose and usage.
-    help_msg: ?[]const u8 = null,
+    help_msg: ?[]const u8,
     /// A detailed string documenting the flag's purpose. For use within instances of a `--help=flag:<flag>` flag;
-    info: ?[]const u8 = null,
+    info: ?[]const u8,
     /// The name of the field representing the flag in the resulting flag `struct`. If `null`, the
     /// field name will be equal to the flag's long form, or the short form if no long form was provided.
-    field_name: ?[:0]const u8 = null,
+    field_name: ?[:0]const u8,
     /// An alternative type name to display in place of a flag's type. For example, one might specify
     /// this to be `"PATH"` if a string argument should represent a filesystem path.
-    alt_type_name: ?[:0]const u8 = null,
+    alt_type_name: ?[:0]const u8,
     /// A list of potential aliases for this flag. No alias may be the same as another alias or the flag's
     /// primary long or short form.
     /// TODO: implement flag aliases
-    /// aliases: []const FlagAlias = &.{},
+    /// aliases: []const Alias,
     pub const Extra = struct {
         info: ?[]const u8 = null,
         field_name: ?[:0]const u8 = null,
         alt_type_name: ?[:0]const u8 = null,
+    };
+
+    const Alias = union(enum) {
+        long: ?[:0]const u8,
+        short: ?u21,
     };
 
     pub inline fn init(comptime T: type, short: ?u21, long: ?[:0]const u8, default_value: ?T, help_msg: ?[]const u8, extra: Extra) Flag {
@@ -159,21 +195,15 @@ pub const Flag = struct {
         return @as(*const flag.type, @ptrCast(@alignCast(flag.default_value_ptr orelse return null))).*;
     }
 
-    pub fn hasDynamicValue(comptime flag: Flag, comptime support_allocation: bool) bool {
-        return if (comptime util.isDynamicMulti(flag.type))
-            true
-        else switch (comptime @typeInfo(flag.type)) {
-            .pointer => |ptr| ptr.size == .Slice and flag.type != []const u8,
-            .array => |arr| support_allocation and arr.child == []const u8,
-            else => false,
-        };
+    pub inline fn hasDynamicValue(comptime flag: Flag) bool {
+        return util.ArgzType.fromZigType(flag.type).requiresAllocator();
     }
 
     /// Returns a type string representing the flag's type. Will *not* append suffixes
     /// to an alternate type name if found, and will cause a compile error if `flag.type` is
     /// equal to `void`.
     pub inline fn typeString(comptime flag: Flag, comptime ignore_alternate: bool) [:0]const u8 {
-        return if (!ignore_alternate and flag.alt_type_name != null) flag.alt_type_name.? else {
+        return if (!ignore_alternate and flag.alt_type_name != null) flag.alt_type_name.? ++ flag.typeStringSuffix() else {
             const check = struct {
                 fn func(comptime T: type) [:0]const u8 {
                     return comptime switch (util.ArgzType.fromZigType(T)) {
@@ -192,8 +222,8 @@ pub const Flag = struct {
                                 else
                                     "STRING"
                             else
-                                func(ptr.child) ++ "...",
-                            .array => |arr| func(arr.child) ++ "[" ++ (if (@typeInfo(arr.child) == .optional) "<=" else "") ++ std.fmt.comptimePrint("{d}", .{arr.len}) ++ "]",
+                                func(ptr.child),
+                            .array => |arr| func(arr.child),
                             .@"enum" => |info| blk: {
                                 var string: [:0]const u8 = "{" ++ info.fields[0].name;
                                 for (info.fields[1..]) |field| {
@@ -204,7 +234,7 @@ pub const Flag = struct {
                                     string
                                 else
                                     // string will likely contribute to a line longer than the terminal width
-                                    T;
+                                    @typeName(T);
                             },
                             .optional => |info| func(info.child),
                             else => unreachable,
@@ -214,7 +244,15 @@ pub const Flag = struct {
                     };
                 }
             }.func;
-            return check(flag.type);
+            return check(flag.type) ++ flag.typeStringSuffix();
+        };
+    }
+
+    fn typeStringSuffix(comptime flag: Flag) [:0]const u8 {
+        return switch (@typeInfo(flag.type)) {
+            .pointer => |ptr| if (ptr.child == u8 and ptr.is_const) "" else "...",
+            .array => |arr| "[" ++ (if (@typeInfo(arr.child) == .optional) "<=" else "") ++ std.fmt.comptimePrint("{d}", .{arr.len}) ++ "]",
+            else => "",
         };
     }
 
@@ -225,35 +263,44 @@ pub const Flag = struct {
         };
     }
 
-    pub const help: Flag = .{
-        .long = "help",
-        .short = 'h',
-        .type = FlagHelp,
-        .info =
-        \\ The '--help' flag displays help regarding program usage.
-        \\ An occurance of the '--help' flag will exit the program.
-        ,
-        .help_msg = "display this help",
-    };
+    pub const help: Flag = .init(FlagHelp, 'h', "help", null, "display this help", .{ .info = 
+    \\ The '--help' flag displays help regarding program usage.
+    \\ An occurance of the '--help' flag will exit the program.
+    });
 };
 
 pub const Positional = struct {
-    /// The string that will be displayed in parentheses or braces in the CLI's help message. This should
-    /// be brief yet descriptive, such as `"PATH"` or `"ITERATIONS"`.
-    display: [:0]const u8,
-    /// The string that will identify the positional's field in the resulting struct. If equal to `null`,
-    /// [fieldName] will return `display` instead.
-    field_name: ?[:0]const u8,
     /// The positional's type. Can *not* be `void`. May be an optional value if and only if all successive positionals are optional.
     ///
     /// Optionally, the very last positional in a positional list may have the type [Trailing], which will collect every string after
     /// a force-stop sequence (`"--"`). The actual type of the positional will be [TrailingPositionals], which will reference
     /// the strings in the arguments passed to the parser.
     type: type,
+    /// The string that will be displayed in parentheses or braces in the CLI's help message. This should
+    /// be brief yet descriptive, such as `"PATH"` or `"ITERATIONS"`.
+    display: [:0]const u8,
     /// A help string describing the positional argument's use.
-    help_msg: ?[]const u8 = null,
+    help_msg: ?[]const u8,
+    /// The string that will identify the positional's field in the resulting struct. If equal to `null`,
+    /// [fieldName] will return `display` instead.
+    field_name: ?[:0]const u8,
     /// A detailed string documenting the positional's purpose. For use within instances of a `--help=pos:<positional>` flag;
     info: ?[]const u8 = null,
+
+    pub const Extra = struct {
+        field_name: ?[:0]const u8 = null,
+        info: ?[:0]const u8 = null,
+    };
+
+    pub fn init(comptime T: type, display: [:0]const u8, help_msg: ?[:0]const u8, extra: Extra) Positional {
+        return .{
+            .type = T,
+            .display = display,
+            .help_msg = help_msg,
+            .field_name = extra.field_name,
+            .info = extra.info,
+        };
+    }
 
     pub fn fieldName(comptime pos: Positional) [:0]const u8 {
         return pos.field_name orelse pos.display;

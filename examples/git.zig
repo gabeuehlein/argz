@@ -14,7 +14,7 @@ const cfg = argz.Config{
         Command{
             .cmd = "clone",
             .help_msg = "clone a repository",
-            .mode = .{ .standard = &.{
+            .mode = .{ .positionals = &.{
                 Positional{
                     .type = []const u8,
                     .display = "PATHSPEC",
