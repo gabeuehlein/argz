@@ -432,12 +432,6 @@ fn ArgParser(comptime cfg: argz.Config) type {
                     variadic_positional_state.deinit(self.allocator);
                 }
             };
-            const dbg = struct {
-                fn dbg(v: anytype) @TypeOf(v) {
-                    std.log.err("{any}", .{v});
-                    return v;
-                }
-            }.dbg;
             top: while (self.lexer.nextToken(flags, switch (mode) {
                 .positionals => .positionals,
                 .commands => |cmds| .{ .commands = .{ .commands = cmds, .default = null } },
@@ -445,10 +439,7 @@ fn ArgParser(comptime cfg: argz.Config) type {
                 found_token = true;
                 switch (tok) {
                     .err => |e| return self.handleErr(e, flags, cmd_stack),
-                    inline .long_flag, .short_flag => |data, tag| if (comptime flags.len == 0 and blk: {
-                        _ = dbg(tag);
-                        break :blk true;
-                    }) unreachable else switch (@intFromEnum(data.index)) {
+                    inline .long_flag, .short_flag => |data, tag| if (comptime flags.len == 0) unreachable else switch (@intFromEnum(data.index)) {
                         inline 0...flags.len - 1 => |idx| self.handleFlag(flags, idx, cmd_stack, if (tag == .long_flag) .long else .short, mode, null, &result.flags, &flags_set) catch |e| {
                             return self.handleInternalError(.{ flags[idx], if (tag == .long_flag) .long else .short }, null, null, e);
                         },
