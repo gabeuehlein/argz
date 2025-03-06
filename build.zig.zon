@@ -1,9 +1,11 @@
 .{
-    .name = "argz",
+    .name = .argz,
 
-    .version = "0.0.1",
+    .version = "0.1.2",
 
-    .minimum_zig_version = "0.13.0",
+    .minimum_zig_version = "0.14.0",
+
+    .fingerprint = 0x6fc79606004e374e,
 
     .paths = .{
         "build.zig",
