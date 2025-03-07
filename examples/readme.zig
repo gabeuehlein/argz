@@ -17,7 +17,7 @@ const config: argz.Config = .{
         .init(void, 'f', "flag", null, "an example flag", .{}),
         // Optional parameters are supported as well. In this case,
         // a correct usage of this flag would be `-j` or `-j=<u32>`.
-        // In the former case, the value corresponding to this value
+        // In the former case, the value corresponding to this flag
         // would be `null`.
         .init(?u32, 'j', null, 1, "number of jobs to use", .{
             // This overrides the field name of the flag in the resulting struct.
