@@ -1,30 +1,106 @@
 ## argz
 
 > [!NOTE]
-> While `argz` will generally function for some CLIs, note that
-> it is not well tested and as such more esoteric configurations
-> may not function properly.
+> `argz` is still in early development. Expect bugs and edge cases if you are using this library for your CLI.
 
-`argz` is a Zig library that provides utilities for parsing command line arguments.
-It is based on `comptime` generation of a parser for a given configuration, which means that parsing your arguments using `argz` does not require an allocator.
-However parsing dynamically-sized values (e.g. slices) with an allocator *is* supported if required.
+`argz` is a Zig library that provides utilities for parsing and handling command line arguments.
+It is based on `comptime` generation of a parser for a given configuration, making a quick ans easy CLI.
 
 ## Features
 
-`argz` currently supports the following:
-  - Basic flag parsing, including flags that take no arguments, an optional argument, or a mandatory argument
-    - Chaining short flags (e.g. `-abc value`) is supported.
-    - Flags which may occur multiple times are supported (e.g. `-afoo -abar -abaz`), but are not currently well-tested.
-  - Parsing of positional arguments (including variadic positionals at the end of a positional list)
-    - Note that optional positionals are not implemented yet, but are a planned feature.
-  - Automatic generation of informational help strings based on a provided configuration
-  - Automatic emission of error messages for insufficient or invalid arguments
-    - Currently, these aren't very descriptive. Fix suggestions and improved error messages are planned, though.
-  - Support for commands with their own set of flags and subcommands/positionals
-  - ANSI escape code support for emitting colorful output
+- Full support for parsing long flags, short flags, and chains of short flags that may optionally
+  take an argument.
+- Support for positional-based CLIs and command-based CLIs.
+- `comptime` generation and verification of a type that represents your CLI.
+- Uses Zig's type system to provide an ergonomic API for generating CLI configurations.
+- Allocators are optional — you can forego an allocator completely if needed.
+- Automatic generation of help/synopsis messages with support for ANSI escape sequences
+  for colored output.
+- (soon) Automatic generation of manual pages and completions for various shells.
 
-## Configuration
+## Examples
 
-The configuration for an `argz`-based command line argument parser is a statically-typed `Config` struct. For many CLI applications, most important parts of this `Config` are the `mode` and the `flags`. The mode must be one of the following:
-  - `.standard` -- This is the `Mode` that most simple projects should use. A `standard` `Mode` allows you to decribe what kinds of positional arguments your CLI expects users to pass to it.
-  - `.commands` -- This `Mode` may be used for advanced projects to group related flags, positionals or subcommands together. Commands are like a dumbed-down `Config` --- they have their own set of flags and their own `mode`, allowing for deep nesting of commands or ending a (potentially nested) command with a set of positionals.
+There are a number of examples that can be found in the [examples](examples/) subdirectory at the root
+of this project. You can run them locally by passing `run-example -Dexample=<example>` to a `zig build`
+invocation.
+
+For a quick taste of how CLIs are written using `argz`, see the additional example below:
+```zig
+const std = @import("std");
+const argz = @import("argz");
+
+const config: argz.Config = .{
+    // Specifies the flags for the application
+    .top_level_flags = &.{
+        .help,
+        // `void` represents a flag that takes no value.
+        // The corresponding field is set to either `true` or `false`
+        // depending on whether the flag was found or not.
+        //
+        // Note: the parameters to `Flag.init` are (1) the flag's type, (2) the flag's short
+        // representation (if applicable), (3) the flag's long representation (if applicable),
+        // (4) the default value for this flag if it isn't provided (`null` indicates that the
+        // flag is mandatory), (5) a brief message describing the flag's usage, and (6) extra
+        // data describing various additional properties of the flag that are less common.
+        .init(void, 'f', "flag", null, "an example flag", .{}),
+        // Optional parameters are supported as well. In this case,
+        // a correct usage of this flag would be `-j` or `-j=<u32>`.
+        // In the former case, the value corresponding to this value
+        // would be `null`.
+        .init(?u32, 'j', null, 1, "number of jobs to use", .{
+            // This overrides the field name of the flag in the resulting struct.
+            // The priority for the field name is detailed below:
+            //   1. `.field_name` in the extra data passed to `Flag.init`
+            //   2. `flag.long`
+            //   3. `flag.short`
+            .field_name = "jobs",
+        }),
+    },
+    .mode = .{
+        .positionals = &.{
+            .init([]const u8, "FILE", "the file to print", .{
+                .field_name = "file",
+            }),
+        },
+    },
+    .support_allocation = false,
+};
+
+pub fn main() !void {
+    // This is a wrapper around `std.os.argv`, meaining that it won't work on Windows or WASI.
+    // `argz.OwnedArgs` must be used in this case.
+    const argv: argz.SystemArgs = .init();
+    var p: argz.Parser = try .init(argv.args(), .{
+        .program_name = "demo",
+        .program_description = "a small demo program",
+    });
+
+    const opts = try p.parse(config);
+
+    const jobs: u32 = opts.flags.jobs orelse 18;
+    if (jobs == 0)
+        p.fatal("jobs must not be zero", .{});
+
+    if (opts.flags.flag) {
+        std.debug.print("accelerating computation using the mysteries of the universe...\n", .{});
+    }
+
+    if (jobs != 1) {
+        std.debug.print("making your computation {d} times faster...\n", .{jobs});
+    }
+    // make the user happy by making it look like we're doing something
+    std.time.sleep(std.time.ns_per_s * 3 / jobs);
+
+    std.debug.print("Printing {s}...\n", .{opts.positionals.file});
+    var f = try std.fs.cwd().openFile(opts.positionals.file, .{});
+    defer f.close();
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = try f.read(&buf);
+        if (n == 0) break;
+        std.debug.print("{s}", .{buf[0..n]});
+    }
+
+    // No allocations, no cleanup!
+}
+```
