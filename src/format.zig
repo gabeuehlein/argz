@@ -169,7 +169,7 @@ fn formatValue(value: anytype, writer: anytype) !void {
         .int, .float => try writer.print("{d}", .{value}),
         .@"enum" => try writer.print("{s}", .{@tagName(value)}),
         .optional => if (value) |v| try formatValue(v, writer) else try writer.writeAll("null"),
-        else => try writer.print("{s} {any}", .{ @TypeOf(value), value }),
+        else => try writer.print("{s} {any}", .{ @typeName(@TypeOf(value)), value }),
     }
 }
 
@@ -182,8 +182,8 @@ pub fn formatAllCommandsDefault(
     if (commands.len == 0) {
         try writer.print("    <no commands available>\n{s} {s}\n", .{
             ansi.ansiFormatter("Note:", emit_ansi_codes, .yellow, .bold),
-            \\ Note: this project doesn't provide any valid values for 'COMMAND.' This may be a bug, and
-            \\     as such you may want to report this issue to the author(s).
+            \\Note: this project doesn't provide any valid values for 'COMMAND.' This may be a bug, and
+            \\    as such you may want to report this issue to the author(s).
         });
         return;
     }
@@ -233,7 +233,7 @@ pub fn formatPrologueDefault(
     description: ?[]const u8,
     writer: anytype,
 ) @TypeOf(writer).Error!void {
-    if (cmd_stack.len != 0) {
+    if (cmd_stack.len == 0) {
         if (description) |desc| {
             try writer.print("{s} - {s}\n\n", .{ program_name, desc });
         }
@@ -259,12 +259,12 @@ pub fn formatPrologueDefault(
                 if (positional.type == argz.Trailing) break;
                 try writer.writeByte(' ');
                 if (@typeInfo(positional.type) == .optional) {
-                    try writer.writeByte('[');
+                    try writer.print("{s}", .{ansi.ansiFormatter("[", emit_ansi_codes, .cyan, .bold)});
                     num_optional_positionals += 1;
                 }
                 try writer.print("{s}", .{ansi.ansiFormatter(positional.displayString(), emit_ansi_codes, .cyan, .bold)});
             }
-            try writer.writeAll("]" ** num_optional_positionals);
+            try writer.print("{s}", .{ansi.ansiFormatter("]" ** num_optional_positionals, emit_ansi_codes, .cyan, .bold)});
             if (positionals.len != 0 and positionals[positionals.len - 1].type == argz.Trailing) {
                 try writer.print(" {s}", .{ansi.ansiFormatter(comptime "[ -- " ++ positionals[positionals.len - 1].displayString() ++ "]", emit_ansi_codes, .cyan, .bold)});
             }

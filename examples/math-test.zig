@@ -17,21 +17,22 @@ const config: argz.Config = .{
         .init(i32, null, "max", 10, "the largest number that a question can have", .{}),
         .init(u32, 'n', "num-questions", 20, "the number of questions to ask", .{}),
     },
-    .program_name = "math-test",
-    .program_description = "a small program that tests your ability to do arithmetic",
     .support_allocation = false,
 };
 
 pub fn main() !void {
     var sys_args = argz.SystemArgs.init();
-    var p = try argz.argParser(config, sys_args.args(), null);
-    const args = try p.parse();
+    var p = try argz.Parser.init(sys_args.args(), .{
+        .program_name = "math",
+        .program_description = "math",
+    });
+    const args = try p.parse(config);
 
     if (args.flags.min > args.flags.max)
-        p.fatal("minimum value must be greater than maximum value", .{});
+        p.fatal("minimum value ({d}) must be greater than maximum value ({d})", .{ args.flags.min, args.flags.max });
 
     const ops = args.flags.operators;
-    const null_index = std.mem.indexOfScalar(?Operator, &ops, null) orelse 3;
+    const null_index = std.mem.indexOfScalar(?Operator, &ops, null) orelse ops.len;
     if (null_index == 0)
         p.fatal("at least one operator must be provided", .{});
 
@@ -56,7 +57,7 @@ pub fn main() !void {
             .mul => "*",
             .div => "/",
         }, b });
-        const answer = in.readUntilDelimiterOrEof(&question_input, '\n') catch |e| p.fatal("couldn't read answer: {s}\n", .{@errorName(e)}) orelse break;
+        const answer = (in.readUntilDelimiterOrEof(&question_input, '\n') catch |e| return p.fatal("couldn't read answer: {s}\n", .{@errorName(e)})) orelse break;
         if (b == 0 and op == .div) {
             if (std.ascii.eqlIgnoreCase(answer, "undefined"))
                 try out.writeAll("Correct!\n")

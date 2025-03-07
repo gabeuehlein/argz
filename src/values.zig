@@ -21,7 +21,8 @@ pub fn ParseStaticValueReturnType(comptime T: type) type {
         .counter => unreachable,
         .trailing,
         .flag_help,
-        .multi, // special cases handled elsewhere
+        .multi,
+        .sequence, // special cases handled elsewhere
         => unreachable,
     };
 }
@@ -33,7 +34,8 @@ pub fn ParseDynamicValueReturnType(comptime T: type) type {
         .counter => unreachable,
         .trailing,
         .flag_help,
-        .multi, // special cases handled elsewhere
+        .multi,
+        .sequence, // special cases handled elsewhere
         => unreachable,
     };
 }
@@ -108,8 +110,11 @@ pub fn parseDynamicValue(comptime T: type, allocator: std.mem.Allocator, string:
                     result.rhs = null;
                 }
             } else if (forward_sep_index) |idx| {
-                result.lhs = try parseDynamicValue(p.lhs_type, allocator, string[0..idx]);
-                result.rhs = try parseDynamicValue(@typeInfo(p.rhs_type).optional.child, allocator, string[idx + 1 ..]);
+                result[0] = try parseDynamicValue(p.lhs_type, allocator, string[0..idx]);
+                result[1] = try parseDynamicValue(switch (@typeInfo(p.rhs_type)) {
+                    .optional => |o| o.child,
+                    else => p.rhs_type,
+                }, allocator, string[idx + 1 ..]);
             } else {
                 return error.InvalidPair;
             }
@@ -158,7 +163,7 @@ pub fn parseDynamicValue(comptime T: type, allocator: std.mem.Allocator, string:
                     };
                     var split = std.mem.splitScalar(u8, string, ',');
                     while (split.next()) |elem| {
-                        try list.append(try parseDynamicValue(ptr.child, allocator, elem));
+                        try list.append(allocator, try parseDynamicValue(ptr.child, allocator, elem));
                     }
                 }
             },
@@ -169,14 +174,14 @@ pub fn parseDynamicValue(comptime T: type, allocator: std.mem.Allocator, string:
     return result;
 }
 
-pub fn freeExt(allocator: std.mem.Allocator, value: anytype) void {
+pub fn freeExt(allocator: std.mem.Allocator, comptime original_type: type, value: anytype) void {
     const argzType = util.ArgzType.fromZigType;
-    switch (argzType(@TypeOf(value))) {
+    switch (argzType(original_type)) {
         .pair => |p| {
             if (argzType(p.lhs_type).requiresAllocator())
-                freeExt(p[0]);
+                freeExt(value[0]);
             if (argzType(p.rhs_type).requiresAllocator())
-                freeExt(p[1]);
+                freeExt(value[1]);
         },
         .multi => |m| {
             if (argzType(m.child).requiresAllocator()) {
@@ -186,16 +191,28 @@ pub fn freeExt(allocator: std.mem.Allocator, value: anytype) void {
             }
             value.deinit(allocator);
         },
-        .zig_primitive => |prim| switch (@typeInfo(prim)) {
-            inline .pointer, .array => |agg| if (prim != []const u8) {
-                if (argzType(agg.child).requiresAllocator()) {
-                    for (value[0..]) |itm| {
-                        freeExt(allocator, itm);
+        .sequence => |tys| {
+            inline for (tys, 0..) |Ty, i| {
+                if (argzType(Ty).requiresAllocator())
+                    freeExt(allocator, value[i]);
+            }
+        },
+        .zig_primitive => |prim| {
+            switch (@typeInfo(prim)) {
+                inline .pointer, .array => |agg| if (prim != []const u8) {
+                    if (argzType(agg.child).requiresAllocator()) {
+                        for (value[0..]) |itm| {
+                            freeExt(allocator, @TypeOf(itm), itm);
+                        }
                     }
-                }
+                    allocator.free(value);
+                },
+                .optional => if (value) |v| freeExt(allocator, v),
+                else => {},
+            }
+            if (comptime argzType(prim).requiresAllocator()) {
                 allocator.free(value);
-            },
-            else => {},
+            }
         },
         else => {},
     }
