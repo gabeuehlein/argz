@@ -262,7 +262,7 @@ pub const Parser = struct {
             }
         }
 
-        while (p.lexer.nextToken(word_mode)) |tok| {
+        top: while (p.lexer.nextToken(word_mode)) |tok| {
             found_token = true;
             switch (tok) {
                 .long_flag => |flag_text| {
@@ -325,6 +325,7 @@ pub const Parser = struct {
                                 if (!found_force_stop)
                                     return p.fail("positional '{s}' must be placed after a force stop (\"--\") sequence", .{positional_text});
                                 @field(mode_data, positionals[idx].fieldName()) = TrailingPositionals.init(p.lexer.args, p.lexer.argi);
+                                break :top;
                             }
                             const ResolvedTy = ArgzType.fromZigType(positionals[idx].type).Resolve(.parse_value, .positional);
                             if (comptime config.support_allocation) {
