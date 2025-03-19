@@ -33,6 +33,9 @@ const config: argz.Config = .{
             .init([]const u8, "FILE", "the file to print", .{
                 .field_name = "file",
             }),
+            .init(argz.Trailing, "NICE WORDS", "nice words to make the computation go faster", .{
+                .field_name = "nice_words",
+            }),
         },
     },
     .support_allocation = false,
@@ -72,6 +75,16 @@ pub fn main() !void {
         if (n == 0) break;
         std.debug.print("{s}", .{buf[0..n]});
     }
+
+    var nice_words = opts.positionals.nice_words;
+    var it = nice_words.iterator();
+    var arg = it.next() orelse return;
+    std.debug.print("The program thanks you for saying the following words of encouragement:\n", .{});
+    while (it.next()) |next_arg| : (arg = next_arg) {
+        std.debug.print("{s}\n", .{arg});
+    }
+    // print the last argument too
+    std.debug.print("{s}\n", .{arg});
 
     // No allocations, no cleanup!
 }

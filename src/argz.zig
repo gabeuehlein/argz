@@ -40,7 +40,10 @@ pub const Mode = union(enum(u1)) {
                         .type = Resolved,
                         .alignment = 0,
                         .is_comptime = false,
-                        .default_value_ptr = if (@typeInfo(Resolved) == .optional) &@as(Resolved, null) else if (@typeInfo(Resolved) == .pointer) @as(*const anyopaque, @ptrCast(&@as(Resolved, &.{}))) else &@as(Resolved, undefined),
+                        .default_value_ptr = if (@typeInfo(Resolved) == .optional) &@as(Resolved, null) else if (@typeInfo(Resolved) == .pointer) @as(*const anyopaque, @ptrCast(&@as(Resolved, &.{}))) else if (Resolved == TrailingPositionals) &TrailingPositionals{
+                            .args = .empty,
+                            .index = 0,
+                        } else &@as(Resolved, undefined),
                     };
                 }
                 return @Type(.{ .@"struct" = .{

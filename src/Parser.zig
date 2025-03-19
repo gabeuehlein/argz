@@ -324,7 +324,7 @@ pub const Parser = struct {
                             if (comptime positionals[idx].type == argz.Trailing) {
                                 if (!found_force_stop)
                                     return p.fail("positional '{s}' must be placed after a force stop (\"--\") sequence", .{positional_text});
-                                @field(mode_data, positionals[idx].fieldName()) = TrailingPositionals.init(p.lexer.args, p.lexer.argi);
+                                @field(mode_data, positionals[idx].fieldName()) = TrailingPositionals.init(p.lexer.args, p.lexer.argi - 1);
                                 break :top;
                             }
                             const ResolvedTy = ArgzType.fromZigType(positionals[idx].type).Resolve(.parse_value, .positional);
@@ -346,7 +346,21 @@ pub const Parser = struct {
                         else => unreachable,
                     }
                 },
-                .force_stop => found_force_stop = true,
+                .force_stop => {
+                    if (comptime mode != .positionals) unreachable;
+                    const positionals = mode.positionals;
+                    if (comptime positionals.len == 0) continue;
+                    blk: switch (positional_index) {
+                        inline 0...positionals.len - 1 => |i| if (comptime positionals.len == 0) break :blk else {
+                            if (positionals[positionals.len - 1].type == argz.Trailing)
+                                if (i != positionals.len - 1)
+                                    return p.fail("missing required positional '{s}'", .{positionals[i].displayString()});
+                        },
+                        positionals.len => {},
+                        else => unreachable,
+                    }
+                    found_force_stop = true;
+                },
                 .flag_eq => return p.fail("wasn't expecting an argument in '{s}'", .{p.lexer.args.get(p.lexer.argi)}),
                 inline else => |_, tag| @panic("TODO: " ++ @tagName(tag)),
             }
@@ -366,12 +380,14 @@ pub const Parser = struct {
             const positionals = mode.positionals;
             if (positional_index != positionals.len) {
                 switch (positional_index) {
-                    inline 0...positionals.len => |i| if (comptime i >= positionals.len) unreachable else blk: {
+                    inline 0...positionals.len => |i| if (comptime i == positionals.len) unreachable else blk: {
                         switch (@typeInfo(positionals[i].type)) {
                             .optional => break :blk,
                             .pointer => |info| if (!(info.child == u8 and info.is_const)) break :blk,
                             else => {},
                         }
+                        if (positionals[i].type == argz.Trailing)
+                            break :blk;
                         return p.fail("missing required positional '{s}'", .{positionals[i].displayString()});
                     },
                     else => unreachable,
