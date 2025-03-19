@@ -171,10 +171,16 @@ pub const Parser = struct {
                 } else try p.lexer.argument(tySupportsLeadingDash(flag.type));
                 const ResolvedTy = ArgzType.fromZigType(flag.type).Resolve(.parse_value, .flag);
                 if (comptime util.isMulti(flag.type)) {
-                    if (comptime config.support_allocation)
-                        try @field(flags_data, flag.fieldName()).append(p.allocator.?, try values.parseDynamicValue(ResolvedTy, p.allocator.?, arg))
+                    const val = if (comptime util.isSequence(flag.type.child))
+                        try p.sequence(config, .fromZigType(flag.type.child), arg)
+                    else if (comptime config.support_allocation)
+                        try values.parseDynamicValue(ResolvedTy, p.allocator.?, arg)
                     else
-                        try @field(flags_data, flag.fieldName()).append(try values.parseDynamicValue(ResolvedTy, p.allocator.?, arg));
+                        try values.parseDynamicValue(ResolvedTy, p.allocator.?, arg);
+                    if (comptime config.support_allocation)
+                        try @field(flags_data, flag.fieldName()).append(p.allocator.?, val)
+                    else
+                        try @field(flags_data, flag.fieldName()).append(val);
                 } else {
                     @field(flags_data, flag.fieldName()) = if (comptime util.isSequence(flag.type))
                         try p.sequence(config, ArgzType.fromZigType(flag.type), arg)

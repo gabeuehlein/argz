@@ -178,13 +178,13 @@ pub fn freeExt(allocator: std.mem.Allocator, comptime original_type: type, value
     const argzType = util.ArgzType.fromZigType;
     switch (argzType(original_type)) {
         .pair => |p| {
-            if (argzType(p.lhs_type).requiresAllocator())
+            if (comptime argzType(p.lhs_type).requiresAllocator())
                 freeExt(value[0]);
-            if (argzType(p.rhs_type).requiresAllocator())
+            if (comptime argzType(p.rhs_type).requiresAllocator())
                 freeExt(value[1]);
         },
         .multi => |m| {
-            if (argzType(m.child).requiresAllocator()) {
+            if (comptime argzType(m.child).requiresAllocator()) {
                 for (value.items) |itm| {
                     freeExt(allocator, itm);
                 }
@@ -193,14 +193,14 @@ pub fn freeExt(allocator: std.mem.Allocator, comptime original_type: type, value
         },
         .sequence => |tys| {
             inline for (tys, 0..) |Ty, i| {
-                if (argzType(Ty).requiresAllocator())
+                if (comptime argzType(Ty).requiresAllocator())
                     freeExt(allocator, value[i]);
             }
         },
         .zig_primitive => |prim| {
             switch (@typeInfo(prim)) {
                 inline .pointer, .array => |agg| if (prim != []const u8) {
-                    if (argzType(agg.child).requiresAllocator()) {
+                    if (comptime argzType(agg.child).requiresAllocator()) {
                         for (value[0..]) |itm| {
                             freeExt(allocator, @TypeOf(itm), itm);
                         }
