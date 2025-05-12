@@ -3,12 +3,10 @@ const argz = @import("argz.zig");
 const util = @import("util.zig");
 const Lexer = @import("Lexer.zig");
 const values = @import("values.zig");
-const ansi = @import("ansi.zig");
 const builtin = @import("builtin");
 
 const assert = std.debug.assert;
 
-const a = ansi.ansiFormatter;
 const Flag = argz.Flag;
 const Command = argz.Command;
 const Mode = argz.Mode;
@@ -17,6 +15,8 @@ const Allocator = std.mem.Allocator;
 const Args = @import("args.zig").Args;
 const ArgzType = util.ArgzType;
 
+const TtyConfig = std.io.tty.Config;
+
 const Type = std.builtin.Type;
 
 const TrailingPositionals = argz.TrailingPositionals;
@@ -24,7 +24,7 @@ const TrailingPositionals = argz.TrailingPositionals;
 pub const Parser = struct {
     pub const Options = struct {
         /// Whether to emit ANSI escape sequences to enable support for colored output.
-        ansi_mode: AnsiMode = .detect,
+        ansi_mode: ColorMode = .detect,
         /// The name of the program that will be shown in descriptive help strings.
         program_name: ?[]const u8 = null,
         /// A brief description of how the program should be used.
@@ -32,10 +32,12 @@ pub const Parser = struct {
         allocator: ?Allocator = null,
     };
 
-    pub const AnsiMode = enum(u2) {
-        /// Don't use ANSI escape sequences, even if stdout/stderr support them.
+    pub const ColorMode = enum(u2) {
+        /// Don't emit color even if stdout/stderr support them. Note that this will be
+        /// forced if the NO_COLOR environment variable is set unless it is disabled in
+        /// the module options.
         disable,
-        /// Use ANSI escape sequences if stdout/stderr support them.
+        /// Enable colored output if stdout/stderr support them.
         detect,
         /// Force the usage of ANSI escape sequences, regardless of whether stdout/stderr
         /// support them. Note that using this is discouraged; if you don't want `argz`
@@ -43,38 +45,26 @@ pub const Parser = struct {
         force,
     };
 
-    stdout_supports_ansi: bool,
-    stderr_supports_ansi: bool,
+    stdout_config: std.io.tty.Config,
+    stderr_config: std.io.tty.Config,
     program_name: ?[]const u8,
     program_description: ?[]const u8,
     allocator: ?Allocator,
     lexer: Lexer,
 
     pub fn init(args: Args, options: Options) !Parser {
-        const stdout_ansi, const stderr_ansi = switch (options.ansi_mode) {
-            .disable => .{ false, false },
+        const stdout_color, const stderr_color = switch (options.ansi_mode) {
+            .disable => .{ .no_color, .no_color },
             .detect => blk: {
-                if (builtin.os.tag == .windows) {
-                    if (std.process.getenvW("NO_COLOR")) |nc| {
-                        if (nc.len != 0)
-                            break :blk .{ false, false };
-                    }
-                } else if (std.posix.getenv("NO_COLOR")) |nc| {
-                    if (nc.len != 0)
-                        break :blk .{ false, false };
-                }
                 const stdout = std.io.getStdOut();
                 const stderr = std.io.getStdErr();
-                break :blk .{
-                    stdout.supportsAnsiEscapeCodes(),
-                    stderr.supportsAnsiEscapeCodes(),
-                };
+                break :blk .{ std.io.tty.detectConfig(stdout), std.io.tty.detectConfig(stderr) };
             },
-            .force => .{ true, true },
+            .force => .{ .escape_codes, .escape_codes },
         };
         return .{
-            .stdout_supports_ansi = stdout_ansi,
-            .stderr_supports_ansi = stderr_ansi,
+            .stdout_config = stdout_color,
+            .stderr_config = stderr_color,
             .program_name = options.program_name,
             .program_description = options.program_description,
             .allocator = options.allocator,
@@ -91,7 +81,7 @@ pub const Parser = struct {
             .positionals => &result.positionals,
             .commands => &result.command,
         }) catch |e| switch (e) {
-            inline error.ArgzFlagHelp => std.process.exit(0),
+            error.ArgzFlagHelp => std.process.exit(0),
             else => return e,
         };
         return result;
@@ -100,17 +90,18 @@ pub const Parser = struct {
     fn writeHelp(
         p: *const Parser,
         writer: anytype,
-        use_ansi: bool,
+        writer_config: std.io.tty.Config,
         comptime config: Config,
         comptime flags: []const Flag,
         comptime command_stack: []const Command,
         comptime mode: Mode,
     ) !void {
         try config.formatters.prologue(
+            writer_config,
+            config,
             command_stack,
             mode,
             flags,
-            use_ansi,
             p.program_name orelse p.lexer.args.get(0),
             p.program_description,
             writer,
@@ -118,10 +109,10 @@ pub const Parser = struct {
         switch (mode) {
             .positionals => {},
             .commands => |commands| {
-                try config.formatters.commands(commands, use_ansi, writer);
+                try config.formatters.commands(writer_config, commands, writer);
             },
         }
-        try config.formatters.flags(flags, use_ansi, writer);
+        try config.formatters.flags(writer_config, flags, writer);
     }
 
     inline fn handleFlag(
@@ -141,10 +132,10 @@ pub const Parser = struct {
                 const category_topic = try p.lexer.argument(true);
                 var split = std.mem.splitScalar(u8, category_topic, ':');
                 const category = split.next() orelse return p.fail("extended help missing topic", .{});
-                const topic = split.next().?; // if ':' was found this will return a second time
-                try config.formatters.expanded_help(mode, flags, p.stdout_supports_ansi, category, topic, stdout.writer());
+                const topic = split.next().?;
+                try config.formatters.expanded_help(p.stdout_config, mode, flags, category, topic, stdout.writer());
             } else {
-                try p.writeHelp(stdout.writer(), p.stdout_supports_ansi, config, flags, command_stack, mode);
+                try p.writeHelp(stdout.writer(), p.stdout_config, config, flags, command_stack, mode);
             }
             return error.ArgzFlagHelp; // let resources get cleaned up before exiting
         }
@@ -378,7 +369,7 @@ pub const Parser = struct {
                 else => true,
             })) {
                 var stdout = std.io.getStdOut();
-                p.writeHelp(stdout.writer(), p.stdout_supports_ansi, config, flags, command_stack, mode) catch {};
+                p.writeHelp(stdout.writer(), p.stdout_config, config, flags, command_stack, mode) catch {};
                 return error.ArgzFlagHelp;
             }
         }
@@ -419,7 +410,7 @@ pub const Parser = struct {
         if (!(stderr.tryLock(.exclusive) catch return error.ParseError))
             return error.ParseError;
         defer stderr.unlock();
-        emitInfo(stderr.writer(), p.stderr_supports_ansi, "error", .red, fmt, .blue, args) catch {};
+        emitInfo(stderr.writer(), p.stderr_config, "error", .red, fmt, .blue, args) catch {};
         return error.ParseError;
     }
 
@@ -428,24 +419,18 @@ pub const Parser = struct {
         std.process.exit(1);
     }
 
-    pub fn emitInfo(writer: anytype, emit_ansi: bool, comptime category: []const u8, comptime category_color: ?ansi.TerminalColor, comptime fmt: []const u8, comptime fmt_color: ?ansi.TerminalColor, args: anytype) !void {
-        try writer.print("{s}", .{a(category ++ ":", emit_ansi, category_color, .bold)});
-        try writer.writeByte(' ');
-        comptime var i: usize = 0;
-        comptime var fmt_parser: std.fmt.Parser = .{ .iter = .{ .i = 0, .bytes = fmt } };
-        inline while (true) : (i += 1) {
-            const str = comptime fmt_parser.until('{');
-            try writer.print("{s}", .{a(str, emit_ansi, fmt_color, null)});
-            if (comptime fmt_parser.maybe('{')) {
-                if (comptime fmt_parser.maybe('{')) {
-                    writer.writeByte('}');
-                } else {
-                    const fmt_spec = comptime fmt_parser.until('}');
-                    if (!comptime fmt_parser.maybe('}')) unreachable;
-                    try std.fmt.format(writer, "{" ++ fmt_spec ++ "}", .{a(args[i], emit_ansi, fmt_color, null)});
-                }
-            } else break;
+    pub fn emitInfo(writer: anytype, cfg: std.io.tty.Config, comptime category: []const u8, comptime category_color: ?std.io.tty.Color, comptime fmt: []const u8, comptime fmt_color: ?std.io.tty.Color, args: anytype,) !void {
+        if (category_color) |col| {
+            try cfg.setColor(writer, .bold);
+            try cfg.setColor(writer, col);
         }
+        try writer.writeAll(category ++ ":");
+        try cfg.setColor(writer, .reset);
+        try writer.writeByte(' ');
+        if (fmt_color) |col|
+            try cfg.setColor(writer, col);
+        try writer.print(fmt, args);
+        try cfg.setColor(writer, .reset); 
         try writer.writeByte('\n');
     }
 
