@@ -1,55 +1,52 @@
-const ansi = @import("ansi.zig");
 const argz = @import("argz.zig");
 const builtin = @import("builtin");
 const std = @import("std");
 
 pub const Formatter = std.fmt.Formatter;
 
-pub const Color = ansi.TerminalColor;
-
-pub const TextModifier = ansi.TextModifier;
+pub const Color = std.io.tty.Color;
 
 const Flag = argz.Flag;
 const Command = argz.Command;
 const Mode = argz.Mode;
 
-pub const AllFlagsFormatFn = fn (comptime []const Flag, bool, anytype) anyerror!void;
+pub const AllFlagsFormatFn = fn (
+    std.io.tty.Config,
+    comptime []const Flag, anytype) anyerror!void;
 
-pub const AllCommandsFormatFn = fn (comptime []const Command, bool, anytype) anyerror!void;
+pub const AllCommandsFormatFn = fn (std.io.tty.Config, comptime []const Command, anytype) anyerror!void;
 
 pub const PrologueFormatFn = fn (
+    config: std.io.tty.Config,
+    comptime main_cfg: argz.Config,
     comptime cmd_stack: []const Command,
     comptime current_mode: Mode,
     comptime current_flags: []const Flag,
-    use_ansi_escape_codes: bool,
     program_name: []const u8,
     description: ?[]const u8,
     writer: anytype,
 ) anyerror!void;
 
-pub const ExpandedHelpFormatFn = fn (
+pub const ExpandedHelpFormatFn = fn ( 
+    config: std.io.tty.Config,
     comptime mode: Mode,
     comptime flags: []const Flag,
-    use_ansi_escape_codes: bool,
     help_category: []const u8,
     help_topic: []const u8,
     writer: anytype,
 ) anyerror!void;
 
 pub const CommandFormatFn = fn (
-    comptime Command,
-    ?Color,
-    ?TextModifier,
-    bool,
-    anytype,
+    config: std.io.tty.Config,
+    comptime cmd: Command,
+    writer: anytype,
     /// Extra data
-    anytype,
+    extra: anytype,
 ) anyerror!void;
 
 pub const FlagFormatFn = fn (
+    config: std.io.tty.Config,
     comptime Flag,
-    ?Color,
-    ?TextModifier,
     bool,
     anytype,
     /// Extra data
@@ -57,12 +54,16 @@ pub const FlagFormatFn = fn (
 ) anyerror!void;
 
 pub fn formatAllFlagsDefault(
+    config: std.io.tty.Config,
     comptime flags: []const Flag,
-    emit_ansi_codes: bool,
     writer: anytype,
 ) @TypeOf(writer).Error!void {
     if (flags.len == 0) return;
-    try writer.print("{s}\n", .{ansi.ansiFormatter("FLAGS:", emit_ansi_codes, .green, .bold)});
+    try config.setColor(writer, .green);
+    try config.setColor(writer, .bold);
+    try writer.writeAll("FLAGS:");
+    try config.setColor(writer, .reset);
+    try writer.writeByte('\n');
     const max_flag_pad, const max_flag_type_pad = comptime blk: {
         var max_flag_pad = 0;
         var max_flag_type_pad = 0;
@@ -84,7 +85,7 @@ pub fn formatAllFlagsDefault(
         break :blk .{ max_flag_pad, max_flag_type_pad };
     };
     inline for (flags) |flag| {
-        try formatFlagDefault(flag, .green, null, emit_ansi_codes, writer, .{
+        try formatFlagDefault(config, flag, writer, .{
             .flag_desc_padding = max_flag_pad,
             .max_flag_type_padding = max_flag_type_pad,
         });
@@ -92,36 +93,40 @@ pub fn formatAllFlagsDefault(
 }
 
 pub fn formatFlagDefault(
+    config: std.io.tty.Config,
     comptime flag: Flag,
-    color: ?Color,
-    text_mod: ?TextModifier,
-    emit_ansi_codes: bool,
     writer: anytype,
     extra: anytype,
 ) @TypeOf(writer).Error!void {
     // excludes leading whitespace
     comptime var total_written = 0;
-    const a = ansi.ansiFormatter;
     try writer.writeAll(" " ** 4);
     if (flag.long) |long| {
-        try writer.print("{s}", .{ansi.ansiFormatter("--" ++ long, emit_ansi_codes, color, text_mod)});
+        try config.setColor(writer, .green);
+        try writer.writeAll("--" ++ long);
+        try config.setColor(writer, .reset);
         total_written += 2 + comptime std.unicode.utf8CountCodepoints(long) catch unreachable;
         if (flag.short != null) {
             try writer.writeAll(", ");
             total_written += 2;
         }
     }
-    if (flag.short) |short| {
-        try writer.print("{s}", .{ansi.ansiFormatter("-" ++ comptime std.unicode.utf8EncodeComptime(short), emit_ansi_codes, color, text_mod)});
+    if (flag.short != null) {
+        try config.setColor(writer, .green);
+        try writer.writeAll(flag.flagString(.short));
+        try config.setColor(writer, .reset);
         total_written += 2;
     }
     const flag_padding, const flag_type_padding = .{ extra.flag_desc_padding, extra.max_flag_type_padding };
     if (flag.type != void and flag.type != argz.FlagHelp) {
         try writer.writeAll(" " ** (flag_padding - total_written + 1));
-        try writer.print("{s}", .{a(if (@typeInfo(flag.type) == .optional)
+        try config.setColor(writer, .cyan);
+        try config.setColor(writer, .bold);
+        try writer.writeAll(if (@typeInfo(flag.type) == .optional)
             "[=" ++ comptime flag.typeString(false) ++ "]"
         else
-            "<" ++ comptime flag.typeString(false) ++ ">", emit_ansi_codes, .cyan, .bold)});
+            "<" ++ comptime flag.typeString(false) ++ ">");
+        try config.setColor(writer, .reset);
         if (flag.help_msg) |help| {
             try writer.writeAll(" " ** (flag_type_padding - (2 + (std.unicode.utf8CountCodepoints(flag.typeString(false)) catch unreachable) + @intFromBool(@typeInfo(flag.type) == .optional))) ++ help);
         }
@@ -169,55 +174,62 @@ fn formatValue(value: anytype, writer: anytype) !void {
         .int, .float => try writer.print("{d}", .{value}),
         .@"enum" => try writer.print("{s}", .{@tagName(value)}),
         .optional => if (value) |v| try formatValue(v, writer) else try writer.writeAll("null"),
-        else => try writer.print("{s} {any}", .{ @typeName(@TypeOf(value)), value }),
+        else => try writer.print("{any}", .{ value }),
     }
 }
 
 pub fn formatAllCommandsDefault(
+    config: std.io.tty.Config,
     comptime commands: []const Command,
-    emit_ansi_codes: bool,
     writer: anytype,
 ) @TypeOf(writer).Error!void {
-    try writer.print("{s}\n", .{ansi.ansiFormatter("COMMAND:", emit_ansi_codes, .green, .bold)});
+    try config.setColor(writer, .green);
+    try config.setColor(writer, .bold);
+    try writer.writeAll("COMMAND:\n");
+    try config.setColor(writer, .reset);
     if (commands.len == 0) {
-        try writer.print("    <no commands available>\n{s} {s}\n", .{
-            ansi.ansiFormatter("Note:", emit_ansi_codes, .yellow, .bold),
-            \\Note: this project doesn't provide any valid values for 'COMMAND.' This may be a bug, and
-            \\    as such you may want to report this issue to the author(s).
-        });
-        return;
-    }
-    const cmd_padding = comptime blk: {
-        var max = 0;
-        for (commands) |cmd| {
-            max = @max(max, std.unicode.utf8CountCodepoints(cmd.cmd) catch unreachable);
-        }
-        break :blk max;
-    };
-    inline for (commands) |cmd| {
-        try formatCommandDefault(
-            cmd,
-            .cyan,
-            .bold,
-            emit_ansi_codes,
-            writer,
-            .{ .cmd_padding = cmd_padding },
+        try config.setColor(writer, .green);
+        try writer.writeAll("    <no commands available>\n");
+        try config.setColor(writer, .yellow);
+        try writer.writeAll("Note:");
+        try config.setColor(writer, .reset);
+        try writer.writeAll(
+            \\ Note: this project doesn't provide any valid values for 'COMMAND.' This may be a bug, and
+            \\       as such you may want to report this issue to the author(s).
         );
+        return;
+    } else {
+        const cmd_padding = comptime blk: {
+            var max = 0;
+            for (commands) |cmd| {
+                max = @max(max, std.unicode.utf8CountCodepoints(cmd.cmd) catch unreachable);
+            }
+            break :blk max;
+        };
+        inline for (commands) |cmd| {
+            try formatCommandDefault(
+                config,
+                cmd,
+                writer,
+                .{ .cmd_padding = cmd_padding },
+            );
+        }
     }
 }
 
 pub fn formatCommandDefault(
+    config: std.io.tty.Config,
     comptime cmd: Command,
-    color: ?Color,
-    text_mod: ?TextModifier,
-    emit_ansi_codes: bool,
     writer: anytype,
     /// Extra data
     extra: anytype,
 ) @TypeOf(writer).Error!void {
     try writer.writeAll(" " ** 4);
     const cmd_padding = extra.cmd_padding;
-    try writer.print("{s}", .{ansi.ansiFormatter(cmd.cmd, emit_ansi_codes, color, text_mod)});
+    try writer.writeAll(" " ** 4);
+    try config.setColor(writer, .green);
+    try writer.writeAll(cmd.cmd);
+    try config.setColor(writer, .reset);
     if (cmd.help_msg) |help| {
         try writer.writeAll(" " ** (cmd_padding - (std.unicode.utf8CountCodepoints(cmd.cmd) catch unreachable) + 1) ++ help);
     }
@@ -225,10 +237,11 @@ pub fn formatCommandDefault(
 }
 
 pub fn formatPrologueDefault(
+    config: std.io.tty.Config,
+    comptime _: argz.Config,
     comptime cmd_stack: []const Command,
     comptime current_mode: Mode,
     comptime current_flags: []const Flag,
-    emit_ansi_codes: bool,
     program_name: []const u8,
     description: ?[]const u8,
     writer: anytype,
@@ -245,39 +258,74 @@ pub fn formatPrologueDefault(
         }
         break :blk result;
     };
-    try writer.print("{s} {s}{s}", .{
-        ansi.ansiFormatter("Usage:", emit_ansi_codes, .green, .bold),
-        ansi.ansiFormatter(program_name, emit_ansi_codes, .blue, .bold),
-        ansi.ansiFormatter(cmd_string, emit_ansi_codes, .blue, .bold),
-    });
-    if (current_flags.len != 0)
-        try writer.print(" {s}", .{ansi.ansiFormatter("[FLAGS]", emit_ansi_codes, .cyan, .bold)});
+    try config.setColor(writer, .green);
+    try config.setColor(writer, .bold);
+    try writer.writeAll("Usage:");
+    try config.setColor(writer, .reset);
+    try writer.writeByte(' ');
+    try config.setColor(writer, .blue);
+    try config.setColor(writer, .bold);
+    try writer.writeAll(program_name);
+    try writer.writeAll(cmd_string);
+    if (current_flags.len != 0) {
+        try writer.writeByte(' ');
+        try config.setColor(writer, .cyan);
+        try writer.writeAll("[FLAGS]");
+    }
+    try config.setColor(writer, .reset);
     switch (current_mode) {
         .positionals => |positionals| {
             comptime var num_optional_positionals = 0;
             inline for (positionals) |positional| {
                 if (positional.type == argz.Trailing) break;
                 try writer.writeByte(' ');
+                try config.setColor(writer, .cyan);
+                try config.setColor(writer, .bold);
                 if (@typeInfo(positional.type) == .optional) {
-                    try writer.print("{s}", .{ansi.ansiFormatter("[", emit_ansi_codes, .cyan, .bold)});
+                    try writer.writeByte('[');
                     num_optional_positionals += 1;
                 }
-                try writer.print("{s}", .{ansi.ansiFormatter(positional.displayString(), emit_ansi_codes, .cyan, .bold)});
+                try writer.writeAll(positional.displayString());
+                try config.setColor(writer, .reset);
             }
-            try writer.print("{s}", .{ansi.ansiFormatter("]" ** num_optional_positionals, emit_ansi_codes, .cyan, .bold)});
+            try config.setColor(writer, .cyan);
+            try config.setColor(writer, .bold);
+            try writer.writeAll("]" ** num_optional_positionals);
+            try config.setColor(writer, .reset);
             if (positionals.len != 0 and positionals[positionals.len - 1].type == argz.Trailing) {
-                try writer.print(" {s}", .{ansi.ansiFormatter(comptime "[ -- " ++ positionals[positionals.len - 1].displayString() ++ "]", emit_ansi_codes, .cyan, .bold)});
+                try writer.writeByte(' ');
+                try config.setColor(writer, .cyan);
+                try config.setColor(writer, .bold);
+                try writer.writeByte('[');
+                try writer.setColor(writer, .reset);
+                try writer.writeByte(' ');
+                try config.setColor(writer, .cyan);
+                try config.setColor(writer, .bold);
+                try writer.writeAll("--");
+                try writer.setColor(writer, .reset);
+                try writer.writeByte(' ');
+                try config.setColor(writer, .cyan);
+                try config.setColor(writer, .bold);
+                try writer.writeAll(positionals[positionals.len - 1].displayString() ++ "]");
+                try writer.writeByte(']');
+                try config.setColor(writer, .reset);
             }
         },
-        .commands => try writer.print(" {s}", .{ansi.ansiFormatter("COMMAND", emit_ansi_codes, .cyan, .bold)}),
+        .commands => {
+            try writer.writeByte(' ');
+            try config.setColor(writer, .cyan);
+            try config.setColor(writer, .bold);
+            try writer.writeAll("COMMAND");
+            try config.setColor(writer, .reset);
+        },
     }
     try writer.writeByte('\n');
 }
 
 pub fn formatExpandedHelpDefault(
+    config: std.io.tty.Config,
     comptime mode: Mode,
     comptime flags: []const Flag,
-    use_ansi_escape_codes: bool,
     help_category: []const u8,
     help_topic: []const u8,
     writer: anytype,
@@ -294,11 +342,12 @@ pub fn formatExpandedHelpDefault(
             .commands => |cmds| {
                 inline for (cmds) |cmd| {
                     if (std.mem.eql(u8, cmd.cmd, help_topic)) {
+                        try config.setColor(writer, .white);
+                        try config.setColor(writer, .bold);
+                        try writer.writeAll("Help for command '" ++ cmd.cmd ++ "':");
+                        try config.setColor(writer, .reset);
                         const help = cmd.info orelse cmd.help_msg orelse return error.NoHelpAvailable;
-                        try writer.print("Help for command '{s}':\n{s}\n", .{
-                            ansi.ansiFormatter(cmd.cmd, use_ansi_escape_codes, .white, .bold),
-                            help,
-                        });
+                        try writer.writeAll("\n" ++ help ++ "\n");
                         return;
                     }
                 }
@@ -311,7 +360,11 @@ pub fn formatExpandedHelpDefault(
                 inline for (positionals) |pos| {
                     if (std.mem.eql(u8, pos.displayString(), help_topic)) {
                         const help = pos.info orelse (pos.help_msg orelse return error.NoHelpAvailable);
-                        try writer.print("Help for positional '{s}':\n{s}\n", .{ ansi.ansiFormatter(pos.displayString(), use_ansi_escape_codes, .white, .bold), help });
+                        try config.setColor(writer, .white);
+                        try config.setColor(writer, .bold);
+                        try writer.writeAll("Help for command '" ++ pos.displayString() ++ "':");
+                        try config.setColor(writer, .reset);
+                        try writer.writeAll("\n" ++ help ++ "\n");
                         return;
                     }
                 }
@@ -331,15 +384,13 @@ pub fn formatExpandedHelpDefault(
                     false;
                 if (matches_long or matches_short) {
                     const help = flag.info orelse (flag.help_msg orelse return error.NoHelpAvailable);
-                    try writer.print("Help for flag '{s}':\n{s}\n", .{
-                        ansi.ansiFormatter(
-                            if (matches_long and flag.long != null) "--" ++ flag.long.? else if (matches_short and flag.short != null) "-" ++ std.unicode.utf8EncodeComptime(flag.short.?) else unreachable,
-                            use_ansi_escape_codes,
-                            .white,
-                            .bold,
-                        ),
-                        help,
-                    });
+                    try config.setColor(writer, .white);
+                    try config.setColor(writer, .bold);
+                    try writer.writeAll("Help for flag '");
+                    try writer.writeAll(flag.flagString(if (matches_long) .long else .short));
+                    try writer.writeAll("':");
+                    try config.setColor(writer, .reset);
+                    try writer.writeAll("\n" ++ help ++ "\n");
                     return;
                 }
             }
