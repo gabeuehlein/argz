@@ -30,27 +30,18 @@ const cfg: argz.Config = .{
                 .field_name = "branch",
             },
         ),
-        .init(
-            "help",
-            &.{.init(void, 'a', "all", null, "show all help about a topic", .{})},
-            .{ .positionals = &.{.init(?[]const u8, "TOPIC", "display help for TOPIC", .{
-                .field_name = "topic",
-            })} },
-            "show help",
-            .{},
-        ),
+        .help,
     } },
     .support_allocation = false,
 };
 
 pub fn main() !void {
-    var argv = argz.SystemArgs.init();
-    var arg_parser: argz.Parser = try .init(argv.args(), .{
+    var arg_parser: argz.Parser = try .init(argz.SystemArgs.init(), .{
         .program_name = "git",
         .program_description = "an imitation of the Git SCM tool's CLI",
         .allocator = null,
+        .make_suggestions = true,
     });
     const opts = try arg_parser.parse(cfg);
-    var stdout = std.io.getStdOut();
-    try stdout.writer().print("The information parsed is {any}\n", .{opts});
+    _ = opts;
 }

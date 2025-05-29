@@ -1,4 +1,4 @@
-// args: foo bar baz ban -- quux "this is a string" --eeeee
+// args: foo bar baz -E ban -- quux "this is a string" --eeeee
 // expected(stderr): foo
 // expected(stderr): bar
 // expected(stderr): baz
@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const argz = @import("argz");
+const builtin = @import("builtin");
 
 const config: argz.Config = .{
     .top_level_flags = &.{
@@ -17,7 +18,7 @@ const config: argz.Config = .{
     },
     .mode = .{
         .positionals = &.{
-            .init([][:0]const u8, "ARG", "the arguments to print", .{
+            .init(argz.types.Multi([:0]const u8, .dynamic), "ARG", "the arguments to print", .{
                 .field_name = "arg",
             }),
         },
@@ -36,19 +37,20 @@ pub fn main() !void {
         _ = debug_allocator.deinit();
     };
 
-    const argv = argz.SystemArgs.init();
-    var p = try argz.Parser.init(argv.args(), .{
+    var p = try argz.Parser.init(argz.SystemArgs.init(), .{
         .program_name = "echo",
         .program_description = "print the provided arguments to stdout",
         .allocator = gpa,
     });
 
-    const opts = try p.parse(config);
+    var opts = try p.parse(config);
+    defer p.deinit(config, &opts);
     var out = if (opts.flags.stderr)
         std.io.getStdErr()
     else
         std.io.getStdOut();
 
-    for (opts.positionals.arg) |arg|
+    for (opts.positionals.arg.items) |arg| {
         try out.writer().print("{s}\n", .{arg});
+    }
 }

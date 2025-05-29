@@ -12,7 +12,7 @@ const config: argz.Config = .{
             // Note that sentinel-terminated strings are used here. it isn't
             // necessary, but it shows that `argz` will append a sentienl to
             // strings (via dynamic allocation) when requested.
-            .init([][:0]const u8, "ARG", "the arguments to print", .{
+            .init(argz.types.Multi([:0]const u8, .dynamic), "ARG", "the arguments to print", .{
                 .field_name = "arg",
             }),
         },
@@ -34,18 +34,19 @@ pub fn main() !void {
     defer arena.deinit();
 
     const argv = argz.SystemArgs.init();
-    var p = try argz.Parser.init(argv.args(), .{
+    var p = try argz.Parser.init(argv, .{
         .program_name = "echo",
         .program_description = "print the provided arguments to stdout",
         .allocator = arena.allocator(),
     });
 
-    const opts = try p.parse(config);
+    var opts = try p.parse(config);
+    defer p.deinit(config, &opts);
     var out = if (opts.flags.stderr)
         std.io.getStdErr()
     else
         std.io.getStdOut();
 
-    for (opts.positionals.arg) |arg|
+    for (opts.positionals.arg.items) |arg|
         try out.writer().print("{s}\n", .{arg});
 }

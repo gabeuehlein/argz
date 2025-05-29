@@ -21,8 +21,7 @@ const config: argz.Config = .{
 };
 
 pub fn main() !void {
-    var sys_args = argz.SystemArgs.init();
-    var p = try argz.Parser.init(sys_args.args(), .{
+    var p = try argz.Parser.init(argz.SystemArgs.init(), .{
         .program_name = "math",
         .program_description = "math",
     });

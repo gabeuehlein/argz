@@ -1,6 +1,9 @@
 const argz = @import("argz.zig");
 const builtin = @import("builtin");
 const std = @import("std");
+const types = @import("types.zig");
+
+const Parser = @import("Parser.zig");
 
 pub const Formatter = std.fmt.Formatter;
 
@@ -16,6 +19,13 @@ pub const AllFlagsFormatFn = fn (
 
 pub const AllCommandsFormatFn = fn (std.io.tty.Config, comptime []const Command, anytype) anyerror!void;
 
+pub const ErrorFormatFn = fn(
+    config: std.io.tty.Config,
+    err: Parser.Error,
+    parser: *Parser,
+    writer: std.io.AnyWriter
+) anyerror!void;
+
 pub const PrologueFormatFn = fn (
     config: std.io.tty.Config,
     comptime main_cfg: argz.Config,
@@ -24,22 +34,13 @@ pub const PrologueFormatFn = fn (
     comptime current_flags: []const Flag,
     program_name: []const u8,
     description: ?[]const u8,
-    writer: anytype,
-) anyerror!void;
-
-pub const ExpandedHelpFormatFn = fn ( 
-    config: std.io.tty.Config,
-    comptime mode: Mode,
-    comptime flags: []const Flag,
-    help_category: []const u8,
-    help_topic: []const u8,
-    writer: anytype,
+    writer: std.io.AnyWriter,
 ) anyerror!void;
 
 pub const CommandFormatFn = fn (
     config: std.io.tty.Config,
     comptime cmd: Command,
-    writer: anytype,
+    writer: std.io.AnyWriter,
     /// Extra data
     extra: anytype,
 ) anyerror!void;
@@ -56,7 +57,7 @@ pub const FlagFormatFn = fn (
 pub fn formatAllFlagsDefault(
     config: std.io.tty.Config,
     comptime flags: []const Flag,
-    writer: anytype,
+    writer: std.io.AnyWriter,
 ) @TypeOf(writer).Error!void {
     if (flags.len == 0) return;
     try config.setColor(writer, .green);
@@ -74,10 +75,10 @@ pub fn formatAllFlagsDefault(
             if (flag.short != null and flag.long != null) tmp += 2;
             max_flag_pad = @max(max_flag_pad, tmp);
 
-            if (flag.type != void and flag.type != argz.FlagHelp) {
+            if (flagTypeString(flag)) |string| {
                 max_flag_type_pad = @max(
                     max_flag_type_pad,
-                    1 + (std.unicode.utf8CountCodepoints(flag.typeString(false)) catch unreachable) +
+                    1 + (std.unicode.utf8CountCodepoints(string) catch unreachable) +
                         @intFromBool(@typeInfo(flag.type) == .optional) + 2,
                 );
             }
@@ -95,7 +96,7 @@ pub fn formatAllFlagsDefault(
 pub fn formatFlagDefault(
     config: std.io.tty.Config,
     comptime flag: Flag,
-    writer: anytype,
+    writer: std.io.AnyWriter,
     extra: anytype,
 ) @TypeOf(writer).Error!void {
     // excludes leading whitespace
@@ -118,22 +119,26 @@ pub fn formatFlagDefault(
         total_written += 2;
     }
     const flag_padding, const flag_type_padding = .{ extra.flag_desc_padding, extra.max_flag_type_padding };
-    if (flag.type != void and flag.type != argz.FlagHelp) {
+    if (flagTypeString(flag)) |string| {
         try writer.writeAll(" " ** (flag_padding - total_written + 1));
         try config.setColor(writer, .cyan);
         try config.setColor(writer, .bold);
         try writer.writeAll(if (@typeInfo(flag.type) == .optional)
-            "[=" ++ comptime flag.typeString(false) ++ "]"
+            "[=" ++ string ++ "]"
         else
-            "<" ++ comptime flag.typeString(false) ++ ">");
+            "<" ++ string ++ ">");
         try config.setColor(writer, .reset);
         if (flag.help_msg) |help| {
-            try writer.writeAll(" " ** (flag_type_padding - (2 + (std.unicode.utf8CountCodepoints(flag.typeString(false)) catch unreachable) + @intFromBool(@typeInfo(flag.type) == .optional))) ++ help);
+            try writer.writeAll(" " ** (flag_type_padding - (2 + (std.unicode.utf8CountCodepoints(string) catch unreachable) + @intFromBool(@typeInfo(flag.type) == .optional))) ++ help);
         }
     } else if (flag.help_msg) |help| {
         try writer.writeAll(" " ** (flag_padding - total_written + 1) ++ " " ** flag_type_padding ++ help);
     }
-    if (flag.type != void and flag.type != argz.FlagHelp) {
+    if (types.custom.isCustomType(flag.type, .flag) and types.custom.customTypeOverridesDefaultValueString(flag.type)) {
+        if (flag.type.defaultValueString(.flag)) |string| {
+            try writer.print(" (default {s})", .{string});
+        }
+    } else if (flag.type != void) {
         if (flag.defaultValue()) |default| {
             try writer.writeAll(" (default ");
             try formatValue(default, writer);
@@ -143,7 +148,7 @@ pub fn formatFlagDefault(
     try writer.writeByte('\n');
 }
 
-fn formatValue(value: anytype, writer: anytype) !void {
+fn formatValue(value: anytype, writer: std.io.AnyWriter) !void {
     switch (@typeInfo(@TypeOf(value))) {
         .array => |arr| {
             try writer.writeByte('[');
@@ -181,7 +186,7 @@ fn formatValue(value: anytype, writer: anytype) !void {
 pub fn formatAllCommandsDefault(
     config: std.io.tty.Config,
     comptime commands: []const Command,
-    writer: anytype,
+    writer: std.io.AnyWriter,
 ) @TypeOf(writer).Error!void {
     try config.setColor(writer, .green);
     try config.setColor(writer, .bold);
@@ -220,7 +225,7 @@ pub fn formatAllCommandsDefault(
 pub fn formatCommandDefault(
     config: std.io.tty.Config,
     comptime cmd: Command,
-    writer: anytype,
+    writer: std.io.AnyWriter,
     /// Extra data
     extra: anytype,
 ) @TypeOf(writer).Error!void {
@@ -244,7 +249,7 @@ pub fn formatPrologueDefault(
     comptime current_flags: []const Flag,
     program_name: []const u8,
     description: ?[]const u8,
-    writer: anytype,
+    writer: std.io.AnyWriter,
 ) @TypeOf(writer).Error!void {
     if (cmd_stack.len == 0) {
         if (description) |desc| {
@@ -277,7 +282,7 @@ pub fn formatPrologueDefault(
         .positionals => |positionals| {
             comptime var num_optional_positionals = 0;
             inline for (positionals) |positional| {
-                if (positional.type == argz.Trailing) break;
+                if (positional.type == types.TrailingPositionals) break;
                 try writer.writeByte(' ');
                 try config.setColor(writer, .cyan);
                 try config.setColor(writer, .bold);
@@ -292,17 +297,17 @@ pub fn formatPrologueDefault(
             try config.setColor(writer, .bold);
             try writer.writeAll("]" ** num_optional_positionals);
             try config.setColor(writer, .reset);
-            if (positionals.len != 0 and positionals[positionals.len - 1].type == argz.Trailing) {
+            if (positionals.len != 0 and positionals[positionals.len - 1].type == types.TrailingPositionals) {
                 try writer.writeByte(' ');
                 try config.setColor(writer, .cyan);
                 try config.setColor(writer, .bold);
                 try writer.writeByte('[');
-                try writer.setColor(writer, .reset);
+                try config.setColor(writer, .reset);
                 try writer.writeByte(' ');
                 try config.setColor(writer, .cyan);
                 try config.setColor(writer, .bold);
                 try writer.writeAll("--");
-                try writer.setColor(writer, .reset);
+                try config.setColor(writer, .reset);
                 try writer.writeByte(' ');
                 try config.setColor(writer, .cyan);
                 try config.setColor(writer, .bold);
@@ -322,79 +327,223 @@ pub fn formatPrologueDefault(
     try writer.writeByte('\n');
 }
 
-pub fn formatExpandedHelpDefault(
-    config: std.io.tty.Config,
-    comptime mode: Mode,
-    comptime flags: []const Flag,
-    help_category: []const u8,
-    help_topic: []const u8,
-    writer: anytype,
-) (@TypeOf(writer).Error || error{ DifferentModeActive, NoHelpAvailable, UnknownHelpCategory, UnknownHelpTopic })!void {
-    if (help_category.len > 32)
-        return error.UnknownHelpCategory;
-    const Category = enum { cmd, command, pos, positional, flag };
-    var tmp: [32]u8 = undefined;
-    for (0.., help_category) |i, chr| {
-        tmp[i] = std.ascii.toLower(chr);
-    }
-    switch (std.meta.stringToEnum(Category, tmp[0..help_category.len]) orelse return error.UnknownHelpCategory) {
-        .command, .cmd => switch (mode) {
-            .commands => |cmds| {
-                inline for (cmds) |cmd| {
-                    if (std.mem.eql(u8, cmd.cmd, help_topic)) {
-                        try config.setColor(writer, .white);
-                        try config.setColor(writer, .bold);
-                        try writer.writeAll("Help for command '" ++ cmd.cmd ++ "':");
-                        try config.setColor(writer, .reset);
-                        const help = cmd.info orelse cmd.help_msg orelse return error.NoHelpAvailable;
-                        try writer.writeAll("\n" ++ help ++ "\n");
-                        return;
+pub fn formatErrorDefault(config: std.io.tty.Config, err: Parser.Error, parser: *Parser, writer: std.io.AnyWriter) anyerror!void {
+    switch (err) {
+        .expected_arg_for_flag => |data| {
+            try emitErr(writer, config, "expected an argument for flag '{s}'", .{data.flag_string});
+            if (data.arg_ty_string) |arg_ty_string|
+                try emitErrNote(writer, config, "flag '{s}' requires an argument of type '{s}'", .{data.flag_string, arg_ty_string});
+        },
+        .unexpected_arg_for_flag => |data| {
+            try emitErr(writer, config, "unexpected argument '{s}' found for flag '{s}'", .{data.arg_string, data.flag_string});
+        },
+        .invalid_arg_for_flag => |data| {
+            try emitErr(writer, config, "invalid argument '{s}' for flag '{s}'", .{data.arg_string, data.flag_string});
+            if (data.arg_ty_string) |arg_ty_string|
+                try emitErrNote(writer, config, "flag '{s}' requires an argument of type '{s}'", .{data.flag_string, arg_ty_string});
+        },
+        .unknown_command => |data| {
+            try emitErr(writer, config, "unknown command '{s}'", .{data.found});
+            if (parser.make_suggestions) {
+                var min_index: usize = 0;
+                var dist: u8 = std.math.maxInt(u8);
+                for (data.candidates, 0..) |candidate, i| {
+                    const new_dist = dlDistance(data.found, candidate); 
+                    if (new_dist < dist) {
+                        min_index = i;
+                        dist = new_dist;
                     }
                 }
-                return error.UnknownHelpTopic;
-            },
-            .positionals => return error.DifferentModeActive,
-        },
-        .positional, .pos => switch (mode) {
-            .positionals => |positionals| {
-                inline for (positionals) |pos| {
-                    if (std.mem.eql(u8, pos.displayString(), help_topic)) {
-                        const help = pos.info orelse (pos.help_msg orelse return error.NoHelpAvailable);
-                        try config.setColor(writer, .white);
-                        try config.setColor(writer, .bold);
-                        try writer.writeAll("Help for command '" ++ pos.displayString() ++ "':");
-                        try config.setColor(writer, .reset);
-                        try writer.writeAll("\n" ++ help ++ "\n");
-                        return;
-                    }
-                }
-                return error.UnknownHelpTopic;
-            },
-            .commands => return error.DifferentModeActive,
-        },
-        .flag => {
-            inline for (flags) |flag| {
-                const matches_long = if (flag.long) |long|
-                    std.mem.eql(u8, long, help_topic)
-                else
-                    false;
-                const matches_short = if (flag.short) |short|
-                    std.mem.eql(u8, &comptime std.unicode.utf8EncodeComptime(short), help_topic)
-                else
-                    false;
-                if (matches_long or matches_short) {
-                    const help = flag.info orelse (flag.help_msg orelse return error.NoHelpAvailable);
-                    try config.setColor(writer, .white);
-                    try config.setColor(writer, .bold);
-                    try writer.writeAll("Help for flag '");
-                    try writer.writeAll(flag.flagString(if (matches_long) .long else .short));
-                    try writer.writeAll("':");
-                    try config.setColor(writer, .reset);
-                    try writer.writeAll("\n" ++ help ++ "\n");
-                    return;
+                if (dist <= data.candidates[min_index].len / 2 + 1) {
+                    try emitErrNote(writer, config, "a command with a similar name exists: '{s}'", .{data.candidates[min_index]});
                 }
             }
-            return error.UnknownHelpTopic;
+        },
+        .unknown_long_flag => |data| {
+            try emitErr(writer, config, "unknown flag '--{s}'", .{data.found});
+            if (parser.make_suggestions) {
+                var min_index: usize = 0;
+                var dist: u8 = std.math.maxInt(u8);
+                for (data.candidates, 0..) |candidate, i| {
+                    const new_dist = dlDistance(data.found, candidate); 
+                    if (new_dist < dist) {
+                        min_index = i;
+                        dist = new_dist;
+                    }
+                }
+                if (dist <= data.candidates[min_index].len / 2) {
+                    try emitErrNote(writer, config, "a flag with a similar name exists: '--{s}'", .{data.candidates[min_index]});
+                }
+            }
+        },
+        .unknown_short_flag => |data| {
+            try emitErr(writer, config, "unknown flag '-{u}'", .{data.found});
+        },
+        .too_many_positionals => |data| {
+            try emitErr(writer, config, "too many positionals provided", .{});
+            try emitErrNote(writer, config, "first extra positional: '{s}'", .{data});
+        },
+        .invalid_positional => |data| {
+            try emitErr(writer, config, "invalid value '{s}' provided for positional argument '{s}'", .{data.arg_string, data.positional_display_name});
+            if (data.arg_ty_string) |arg_ty_string|
+                try emitErrNote(writer, config, "positional '{s}' requires an argument of type '{s}'", .{data.arg_string, arg_ty_string});
+        },
+        .missing_positionals => |missing| {
+            const max_missing_notes = 3;
+            if (missing.len == 1)
+                try emitErr(writer, config, "missing 1 positional argument", .{})
+            else 
+                try emitErr(writer, config, "missing {d} positional arguments", .{missing.len});
+            for (0..@min(missing.len, max_missing_notes)) |i| {
+                try emitErrNote(writer, config, "missing positional: {s}", .{missing[i]});
+            }
+            if (missing.len > max_missing_notes) {
+                switch (missing.len - max_missing_notes) {
+                    1 => try emitErrNote(writer, config, "missing 1 other positional", .{}),
+                    else => |n| try emitErrNote(writer, config, "missing {d} other positionals", .{n}),
+                }
+            }
+        },
+        .no_command_provided => try emitErr(writer, config, "no command provided", .{}),
+        .custom => |data| data.handler(parser, data.context, writer, config),
+    }
+}
+
+/// Only returns strings for long flag aliases. All command aliases are returned.
+pub fn getAliasStrings(comptime cmd_or_flag: anytype) []const [:0]const u8 {
+    switch (@TypeOf(cmd_or_flag)) {
+        Command => return cmd_or_flag.aliases,
+        Flag => {
+            comptime var aliases: [cmd_or_flag.aliases.len][:0]const u8 = undefined;
+            inline for (cmd_or_flag.aliases) |alias| {
+                switch (alias) {
+                    .long => |long| aliases = aliases ++ .{long},
+                    .short => {},
+                }
+            }
+            return &aliases;
+        },
+        else => @compileError("invalid value of type '" ++ @typeName(@TypeOf(cmd_or_flag)) ++ "' passed to getAliases'"),
+    }
+}
+
+pub fn emitErr(writer: anytype, config: std.io.tty.Config, comptime fmt: []const u8, args: anytype) !void {
+    try emitInfo(writer, config, "error", .red, fmt, .reset, args);
+}
+
+pub fn emitErrNote(writer: anytype, config: std.io.tty.Config, comptime fmt: []const u8, args: anytype) !void {
+    try emitInfo(writer, config, "note", .cyan, fmt, .reset, args);
+}
+
+pub fn emitInfo(
+    writer: anytype,
+    cfg: std.io.tty.Config,
+    comptime category: []const u8,
+    comptime category_color: ?std.io.tty.Color,
+    comptime fmt: []const u8,
+    comptime fmt_color: ?std.io.tty.Color,
+    args: anytype,
+) !void {
+    if (category_color) |col| {
+        try cfg.setColor(writer, .bold);
+        try cfg.setColor(writer, col);
+    }
+    try writer.writeAll(category ++ ":");
+    try cfg.setColor(writer, .reset);
+    try writer.writeByte(' ');
+    if (fmt_color) |col|
+        try cfg.setColor(writer, col);
+    try writer.print(fmt, args);
+    try cfg.setColor(writer, .reset);
+    try writer.writeByte('\n');
+}
+
+pub inline fn flagTypeString(comptime flag: Flag) ?[:0]const u8 {
+    comptime if (flag.alt_type_name) |alt| return alt;
+    return comptime typeString(flag.type, .flag);
+}
+
+pub inline fn typeString(comptime T: type, comptime context: Parser.Context.Tag) ?[:0]const u8 {
+    return types.typeName(T, context);
+}
+
+pub fn commandHelpDefaultCallback(
+    comptime config: argz.Config,
+    comptime _: Command,
+    comptime command_stack: []const Command,
+    comptime mode: Mode,
+    comptime flags: []const Flag,
+    parser: *const Parser,
+    _: []const u8
+) !void {
+    var stdout = std.io.getStdOut();
+    const writer = stdout.writer();
+    try Parser.formatters.prologue(
+        parser.stdout_config,
+        config,
+        command_stack,
+        mode,
+        flags,
+        parser.program_name orelse parser.lexer.args.get(0),
+        parser.program_description,
+        writer.any(),
+    );
+    switch (mode) {
+        .positionals => {},
+        .commands => |commands| {
+            try Parser.formatters.commands(parser.stdout_config, commands, writer.any());
         },
     }
+    try Parser.formatters.flags(parser.stdout_config, flags, writer.any());
+    std.process.exit(0);
+}
+
+/// Computes the Damerau-Levenshtein distance between two strings
+/// `a` and `b`. Note that this only considers strings up to 256 bytes
+/// long. If either string is longer than `maxInt(u8)` characters, this function will instantly
+/// return `maxInt(u8)`.
+///
+/// This function may be useful to determine string similarity for making suggestions
+/// based on unknown inputs' similarity to known commands or flags. It has time complexity
+/// `O(mn)`, where `m = a.len` and `n = b.len` and uses `O(1)` space.
+pub fn dlDistance(a: []const u8, b: []const u8) u8 {
+    const max_u8 = std.math.maxInt(u8);
+    var short: []const u8 = undefined; // shorter of a and b
+    var long: []const u8 = undefined; // longer of a and b
+    var current_row: [max_u8 + 1]u8 = undefined;
+    var previous_row: [max_u8 + 1]u8 = undefined;
+
+    if (a.len > max_u8 or b.len > max_u8)
+        return max_u8;
+    if (a.len == 0 or b.len == 0)
+        return @truncate(a.len | b.len);
+
+    if (a.len > b.len) {
+        short = b;
+        long = a;
+    } else {
+        short = a;
+        long = b;
+    }
+
+    current_row = @splat(0);
+    for (0..long.len + 1) |i| {
+        previous_row[i] = @intCast(i);
+    }
+    
+    for (0..short.len)|i| {
+        for (0..long.len) |j| {
+            const cost = @intFromBool(short[i] != long[j]);
+            current_row[j + 1] = @min(
+               previous_row[j+1] + 1,
+               current_row[j] + 1,
+               previous_row[j] + cost
+            );
+            if (i != 0 and j != 0 and short[i] == long[j-1] and short[i-1] == long[j-1])
+                current_row[j+1] = @min(current_row[j+1], previous_row[j-1] + 1);
+        }
+        @memcpy(&previous_row, &current_row);
+        @memset(current_row[0..long.len], 0);
+    }
+    return previous_row[long.len];
 }
