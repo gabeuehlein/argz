@@ -9,7 +9,7 @@ const config: argz.Config = .{
         .init(u64, 'q', "quantity", 1, "number of random numbers to generate", .{}),
         .init(void, 'i', "integer", null, "generate integers", .{}),
         .init(void, 'c', "coin-flip", null, "simulate an unbiased coin flip", .{}),
-        .init(void, null, "same-line", true, "emit all random numbers on the same line", .{}),
+        .init(void, null, "same-line", false, "emit all random numbers on the same line", .{}),
         .help,
     },
     .support_allocation = false,
@@ -40,7 +40,7 @@ pub fn main() !void {
             }
         } else {
             if (opts.flags.min > opts.flags.max)
-                p.fatal("minimum value must be greater than maximum value", .{});
+                p.fatal("minimum value must be less than maximum value", .{});
             if (opts.flags.integer) {
                 if (@mod(opts.flags.min, 1.0) != 0.0)
                     p.fatal("minimum value must be an integer with the -i flag set", .{});

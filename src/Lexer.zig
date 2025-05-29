@@ -1,5 +1,4 @@
 const std = @import("std");
-const util = @import("util.zig");
 const Args = @import("args.zig").Args;
 const argz = @import("argz.zig");
 
@@ -9,7 +8,6 @@ const Config = argz.Config;
 const Flag = argz.Flag;
 const Command = argz.Command;
 const Positional = argz.Positional;
-const FlagType = util.FlagType;
 
 const Lexer = @This();
 
@@ -19,7 +17,6 @@ argi: usize = 1,
 /// indicates that we are currently in the middle of lexing a sequence
 /// of short flags.
 subargi: usize = 0,
-found_eq: bool = false,
 found_force_stop: bool = false,
 
 pub const WordMode = enum {
@@ -28,24 +25,9 @@ pub const WordMode = enum {
 };
 
 pub const TokenTag = enum {
-    /// "--" string ('=' string)?
-    ///      ^^^^^^
     long_flag,
-    /// '-' char ('='? string) | char?+)
-    ///     ^^^^
     short_flag,
-    /// '-' char [('='? string) | char?+)]
-    ///                           ^^^^
-    short_chain,
-    /// (string flag* command?) | (string [flag | positional | force-stop]*)
-    ///  ^^^^^^                    ^^^^^^
-    command,
-    /// string
-    positional,
-    /// "--"
-    force_stop,
-    /// flag '=' string
-    ///      ^^^
+    word,
     flag_eq,
     err,
 };
@@ -53,10 +35,9 @@ pub const TokenTag = enum {
 pub const Token = union(TokenTag) {
     long_flag: []const u8,
     short_flag: u21,
-    short_chain: u21,
-    command: []const u8,
-    positional: []const u8,
-    force_stop,
+    /// Also may include '--', which is typically treated as a "force stop"
+    /// sequence to abort parsing flags.
+    word: []const u8,
     flag_eq,
     err: Error,
 
@@ -82,7 +63,7 @@ pub fn init(args: Args) !Lexer {
     return .{ .args = args };
 }
 
-pub fn nextToken(lexer: *Lexer, word_mode: WordMode) ?Token {
+pub fn nextToken(lexer: *Lexer) ?Token {
     if (lexer.argi == lexer.args.len)
         return null;
     const arg = lexer.args.get(lexer.argi);
@@ -90,38 +71,30 @@ pub fn nextToken(lexer: *Lexer, word_mode: WordMode) ?Token {
         if (lexer.subargi == arg.len) {
             return if (!lexer.loadNextArg())
                 null
-            else
-                // See https://github.com/ziglang/zig/issues/19398 for why this uses `@call` with `.auto`.
-                // It should really use `.always_tail` when it doesn't emit a broken LLVM module.
-                @call(.auto, nextToken, .{ lexer, word_mode });
+            else lexer.nextToken();
+            //   ^ TODO force this to be a tail call when
+            //   https://github.com/ziglang/zig/issues/19398 gets fixed.
         } else {
             const len, const ch = decodeCharAtArgPos(arg, lexer.subargi);
             lexer.subargi += len;
             return if (ch == '=') blk: {
-                lexer.found_eq = true;
                 break :blk .flag_eq;
-            } else .{ .short_chain = ch };
+            } else .{ .short_flag = ch };
         }
     }
     if (lexer.found_force_stop)
-        return .{ .positional = lexer.argument(true) catch unreachable };
+        return .{ .word = lexer.argument(true) catch unreachable };
     if (arg.len == 0) {
         defer _ = lexer.loadNextArg();
         if (lexer.found_force_stop)
-            return .{ .positional = arg };
+            return .{ .word = arg };
         return .{ .err = .{ .empty_argument = lexer.argi } };
     } else switch (arg[0]) {
         '-' => {
             if (arg.len != 1) return switch (arg[1]) {
                 '-' => return if (arg.len == 2) blk: {
                     defer _ = lexer.loadNextArg();
-                    switch (word_mode) {
-                        .positionals => {
-                            lexer.found_force_stop = true;
-                            break :blk .force_stop;
-                        },
-                        .commands => break :blk .{ .command = arg },
-                    }
+                    break :blk .{ .word = arg };
                 } else {
                     const idx = std.mem.indexOfScalar(u8, arg[2..], '=');
                     if (idx) |i| {
@@ -136,18 +109,12 @@ pub fn nextToken(lexer: *Lexer, word_mode: WordMode) ?Token {
                 },
             } else {
                 _ = lexer.loadNextArg();
-                return switch (word_mode) {
-                    .commands => .{ .command = arg },
-                    .positionals => .{ .positional = arg },
-                };
+                return .{ .word = arg };
             }
         },
         else => {
             _ = lexer.loadNextArg();
-            return switch (word_mode) {
-                .commands => .{ .command = arg },
-                .positionals => .{ .positional = arg },
-            };
+            return .{ .word = arg };
         },
     }
 }
@@ -155,21 +122,18 @@ pub fn nextToken(lexer: *Lexer, word_mode: WordMode) ?Token {
 pub fn argument(lexer: *Lexer, accept_leading_dash: bool) ![]const u8 {
     var arg = lexer.currentArg() orelse return error.MissingArgument;
     if (lexer.subargi != 0) {
-        if (lexer.subargi >= arg.len) {
-            if (!lexer.loadNextArg())
-                return error.MissingArgument
-            else
-                arg = lexer.currentArg().?;
+        if (lexer.subargi == arg.len) {
+            _ = lexer.loadNextArg();
+            return lexer.currentArg() orelse return error.MissingArgument;
         } else {
+            assert(lexer.subargi < arg.len);
             defer _ = lexer.loadNextArg();
             return arg[lexer.subargi..];
         }
     }
     if (arg.len == 0) {
-        if (lexer.found_force_stop) {
-            _ = lexer.loadNextArg();
-            return arg;
-        } else return error.EmptyArgument;
+        _ = lexer.loadNextArg();
+        return "";
     } else return switch (arg[0]) {
         '-' => if (lexer.found_force_stop or accept_leading_dash) blk: {
             _ = lexer.loadNextArg();
@@ -182,24 +146,25 @@ pub fn argument(lexer: *Lexer, accept_leading_dash: bool) ![]const u8 {
     };
 }
 
-pub fn peek(lexer: *const Lexer, word_mode: WordMode) ?Token {
+pub fn peek(lexer: *const Lexer) ?Token {
     var copy = lexer.*;
-    return copy.nextToken(word_mode);
+    return copy.nextToken();
 }
 
-pub fn maybe(lexer: *Lexer, tag: TokenTag, word_mode: WordMode) ?Token {
+pub inline fn maybe(lexer: *Lexer, comptime tags: []const TokenTag) ?Token {
     var copy = lexer.*;
-    const tok = copy.nextToken(word_mode) orelse return null;
-    if (tok == tag) {
-        lexer.* = copy;
-        return tok;
+    const tok = copy.nextToken() orelse return null;
+    inline for (tags) |tag| {
+        if (tok == tag) {
+            lexer.* = copy;
+            return tok;
+        }
     }
     return null;
 }
 
 fn loadNextArg(lexer: *Lexer) bool {
     lexer.subargi = 0;
-    lexer.found_eq = false;
     if (lexer.argi >= lexer.args.len)
         return false;
     lexer.argi += 1;
@@ -257,7 +222,7 @@ test Lexer {
     var sys_args = argz.OwnedArgs.init(argv);
     const args = sys_args.args();
     var lexer = try Lexer.init(args);
-    while (lexer.nextToken(.positionals)) |tok| {
+    while (lexer.nextToken()) |tok| {
         std.log.err("{any}", .{tok});
     }
 }

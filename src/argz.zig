@@ -1,6 +1,5 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const util = @import("util.zig");
 const args = @import("args.zig");
 
 const Type = std.builtin.Type;
@@ -11,13 +10,7 @@ pub const SystemArgs = args.SystemArgs;
 pub const Parser = @import("Parser.zig").Parser;
 pub const Lexer = @import("Lexer.zig");
 pub const fmt = @import("format.zig");
-
-/// Dummy type indicating that positional should capture all arguments found after
-/// a force stop ('--'); this must be the last positional in a positional list.
-pub const Trailing = struct {};
-
-/// Dummy type indicating that a flag should serve to print a message showing usage information and exit.
-pub const FlagHelp = struct {};
+pub const types = @import("types.zig");
 
 pub const Mode = union(enum(u1)) {
     /// Specifies the usage of a set of commands and subcommands (and sub-subcommands, and so on).
@@ -29,21 +22,20 @@ pub const Mode = union(enum(u1)) {
     /// and [Commands](argz.Command) nested at any level.
     positionals: []const Positional,
 
+    pub const Tag = std.meta.Tag(Mode);
+
     pub inline fn ToType(comptime mode: Mode) type {
         switch (mode) {
             .positionals => |positionals| comptime {
                 var struct_fields: [positionals.len]Type.StructField = undefined;
                 for (positionals, 0..) |positional, i| {
-                    const Resolved = util.ArgzType.fromZigType(positional.type).Resolve(.struct_field, .positional);
+                    const Resolved = types.StructField(positional.type, .positional);
                     struct_fields[i] = Type.StructField{
                         .name = positional.fieldName(),
                         .type = Resolved,
                         .alignment = 0,
                         .is_comptime = false,
-                        .default_value_ptr = if (@typeInfo(Resolved) == .optional) &@as(Resolved, null) else if (@typeInfo(Resolved) == .pointer) @as(*const anyopaque, @ptrCast(&@as(Resolved, &.{}))) else if (Resolved == TrailingPositionals) &TrailingPositionals{
-                            .args = .empty,
-                            .index = 0,
-                        } else &@as(Resolved, undefined),
+                        .default_value_ptr = if (@typeInfo(Resolved) == .optional) &@as(Resolved, null) else if (Resolved.defaultValue(.positional)) |dv| &dv else &@as(Resolved, undefined) 
                     };
                 }
                 return @Type(.{ .@"struct" = .{
@@ -97,12 +89,6 @@ pub const Config = struct {
     /// Note that slices are to be passed as comma-separated strings containing the data to be parsed. There is currently
     /// no way to escape commas in slices of strings. Each application must implement their own way of doing so themselves.
     support_allocation: bool = false,
-    formatters: struct {
-        flags: fmt.AllFlagsFormatFn = fmt.formatAllFlagsDefault,
-        commands: fmt.AllCommandsFormatFn = fmt.formatAllCommandsDefault,
-        prologue: fmt.PrologueFormatFn = fmt.formatPrologueDefault,
-        expanded_help: fmt.ExpandedHelpFormatFn = fmt.formatExpandedHelpDefault,
-    } = .{},
 };
 
 pub const Command = struct {
@@ -119,26 +105,44 @@ pub const Command = struct {
     help_msg: ?[]const u8,
     /// An override for the default field name of the command.
     field_name: ?[:0]const u8,
-    /// Whether to designate this flag as a help command. Note that multiple such help commands can
-    /// exist in one set of commands, and it is not checked that there is at most one help command.
-    is_help: bool,
     /// A detailed string documenting the command's purpose. For use within instances of a `--help=cmd:<command>` flag;
     info: ?[]const u8,
-    // TODO: implement command aliases
-    // aliases: []const [:0]const u8 = &.{},
+    aliases: []const [:0]const u8 = &.{},
+    callback: CommandCallback,
+
+    pub const CommandCallback = fn(
+        comptime config: Config,
+        comptime cmd: Command,
+        comptime command_stack: []const Command,
+        comptime mode: Mode,
+        comptime flags: []const Flag,
+        parser: *const Parser,
+        _: []const u8,
+    ) anyerror!void;
 
     pub const Extra = struct {
         field_name: ?[:0]const u8 = null,
         is_help: bool = false,
         info: ?[]const u8 = null,
+        callback: CommandCallback = noopCommandCallback,
     };
 
+    pub fn noopCommandCallback(
+        comptime _: Config,
+        comptime _: Command,
+        comptime _: []const Command,
+        comptime _: Mode,
+        comptime _: []const Flag,
+        _: *const Parser,
+        _: []const u8,
+    ) anyerror!void {}
+
     pub const help: Command = .init("help", &.{}, .{ .positionals = &.{} }, "show this help", .{
-        .is_help = true,
         .info =
-        \\ The 'help' command displays help regarding program usage
-        \\ and exits the program gracefully.
+        \\The 'help' command displays help regarding program usage
+        \\and exits the program gracefully.
         ,
+        .callback = fmt.commandHelpDefaultCallback,
     });
 
     pub inline fn init(cmd: [:0]const u8, flags: []const Flag, mode: Mode, help_msg: ?[]const u8, extra: Extra) Command {
@@ -148,7 +152,7 @@ pub const Command = struct {
             switch (mode) {
                 .positionals => |positionals| if (positionals.len != 0)
                     @compileError("help command must not have any positional arguments"),
-                .commands => @compileError("help command must have a Mode of '.positionals'"),
+                .commands => @compileError("help command must have a mode of '.positionals'"),
             }
         }
         return comptime .{
@@ -157,8 +161,8 @@ pub const Command = struct {
             .mode = mode,
             .help_msg = help_msg,
             .field_name = extra.field_name,
-            .is_help = extra.is_help,
             .info = extra.info,
+            .callback = extra.callback,
         };
     }
 
@@ -167,34 +171,9 @@ pub const Command = struct {
     }
 
     pub inline fn ToType(comptime cmd: Command) type {
-        const Flags = util.StructFromFlags(cmd.flags);
-        return switch (cmd.mode) {
-            .positionals => struct { flags: Flags, positionals: cmd.mode.ToType() },
-            .commands => struct { flags: Flags, cmd: cmd.mode.ToType() },
-        };
+        return types.WrapModeAndFlags(cmd.mode, cmd.flags);   
     }
 };
-
-pub fn Pair(comptime First: type, comptime Second: type, comptime _separator: u21) type {
-    return struct {
-        pub const argz_pair_tag = {};
-
-        pub const lhs_ty = First;
-        pub const rhs_ty = Second;
-        pub const separator = _separator;
-    };
-}
-
-/// A sequence of values represented as different arguments. Optional
-/// arguments may be placed at the end if they are not absolutely required
-/// for parsing.
-pub fn Sequence(comptime tys: []const type) type {
-    return struct {
-        pub const argz_sequence_tag = {};
-
-        pub const items: []const type = tys;
-    };
-}
 
 pub const Flag = struct {
     /// The short form of the flag. If equal to `null`, `long` must have a valid representation.
@@ -218,32 +197,21 @@ pub const Flag = struct {
     alt_type_name: ?[:0]const u8,
     // A list of potential aliases for this flag. No alias may be the same as another alias or the flag's
     // primary long or short form.
-    // TODO implement flag aliases
-    // aliases: []const Alias,
+    aliases: []const Identifier,
+    dependencies: []const Dependency,
 
-    pub const Extra = struct {
-        info: ?[]const u8 = null,
-        field_name: ?[:0]const u8 = null,
-        alt_type_name: ?[:0]const u8 = null,
-        // aliases: []const Alias = &.{},
-    };
-
-    const Alias = union(enum) {
-        long: ?[:0]const u8,
-        short: ?u21,
-    };
-
-    pub inline fn init(comptime T: type, short: ?u21, long: ?[:0]const u8, default_value: ?Resolve(T), help_msg: ?[]const u8, extra: Extra) Flag {
+    pub inline fn init(comptime T: type, short: ?u21, long: ?[:0]const u8, default_value: ?types.StructField(T, .flag), help_msg: ?[]const u8, extra: Extra) Flag {
         return comptime .{
             .short = short,
             .long = long,
             .type = T,
-            .default_value_ptr = if (default_value) |dv| @ptrCast(&@as(Resolve(T), dv)) else null,
+            .default_value_ptr = if (default_value) |dv| @ptrCast(&@as(types.StructField(T, .flag), dv)) else null,
             .help_msg = help_msg,
             .info = extra.info,
             .field_name = extra.field_name,
             .alt_type_name = extra.alt_type_name,
-            //   .aliases = extra.aliases,
+            .aliases = extra.aliases,
+            .dependencies = extra.dependencies,
         };
     }
 
@@ -251,96 +219,77 @@ pub const Flag = struct {
         return flag.field_name orelse (flag.long orelse std.fmt.comptimePrint("{u}", .{flag.short.?}));
     }
 
-    pub inline fn defaultValue(comptime flag: Flag) ?Resolve(flag.type) {
-        return @as(*const Resolve(flag.type), @ptrCast(@alignCast(flag.default_value_ptr orelse return null))).*;
+    pub inline fn defaultValue(comptime flag: Flag) ?types.StructField(flag.type, .flag) {
+        if (flag.default_value_ptr) |dvp|
+            return @as(*const types.StructField(flag.type, .flag), @ptrCast(@alignCast(dvp))).*;
+        if (flag.type == void)
+            return false;
+        if (types.custom.isCustomType(flag.type, .flag))
+            return flag.type.defaultValue(.flag);
+        return null;
     }
 
-    pub inline fn hasDynamicValue(comptime flag: Flag) bool {
-        return util.ArgzType.fromZigType(flag.type).requiresAllocator();
-    }
-
-    inline fn Resolve(comptime T: type) type {
-        return util.ArgzType.fromZigType(T).Resolve(.struct_field, .flag);
-    }
-
-    /// Returns a type string representing the flag's type. Will *not* append suffixes
-    /// to an alternate type name if found, and will cause a compile error if `flag.type` is
-    /// equal to `void`.
-    pub inline fn typeString(comptime flag: Flag, comptime ignore_alternate: bool) [:0]const u8 {
-        return if (!ignore_alternate and flag.alt_type_name != null) flag.alt_type_name.? ++ flag.typeStringSuffix() else {
-            const check = struct {
-                fn func(comptime T: type) [:0]const u8 {
-                    return comptime switch (util.ArgzType.fromZigType(T)) {
-                        .counter => "COUNTER",
-                        .pair => |p| std.fmt.comptimePrint("{s}{u}{s}", .{ func(p.Lhs), p.separator, func(p.Rhs) }),
-                        .multi => |m| func(m.child),
-                        .zig_primitive => |prim| switch (@typeInfo(prim)) {
-                            .void,
-                            => unreachable,
-                            .int => "INTEGER",
-                            .float => "NUMBER",
-                            .bool => "BOOLEAN",
-                            .pointer => |ptr| if (ptr.child == u8 and ptr.is_const)
-                                if (ptr.sentinel()) |sentinel|
-                                    if (sentinel != 0)
-                                        "STRING \\ " ++ if (sentinel >= 32 and sentinel <= 127) .{sentinel} else std.fmt.comptimePrint("{d}", .{sentinel})
-                                    else
-                                        "STRING"
-                                else
-                                    "STRING"
-                            else
-                                func(ptr.child),
-                            .array => |arr| func(arr.child),
-                            .@"enum" => |info| blk: {
-                                var string: [:0]const u8 = "{" ++ info.fields[0].name;
-                                for (info.fields[1..]) |field| {
-                                    string = string ++ "|" ++ field.name;
-                                }
-                                string = string ++ "}";
-                                break :blk if (string.len < 60)
-                                    string
-                                else
-                                    // string will likely contribute to a line longer than the terminal width
-                                    @typeName(T);
-                            },
-                            .optional => |info| func(info.child),
-                            else => unreachable,
-                        },
-                        .trailing => unreachable,
-                        .flag_help => unreachable,
-                        .sequence => |tys| blk: {
-                            var result: [:0]const u8 = func(tys[0]);
-                            for (tys[1..]) |Ty| {
-                                result = result ++ " " ++ func(Ty);
-                            }
-                            break :blk result;
-                        },
-                    };
-                }
-            }.func;
-            return check(flag.type) ++ flag.typeStringSuffix();
-        };
-    }
-
-    inline fn typeStringSuffix(comptime flag: Flag) [:0]const u8 {
-        return switch (@typeInfo(flag.type)) {
-            .pointer => |ptr| if (ptr.child == u8 and ptr.is_const) "" else "...",
-            .array => |arr| "[" ++ (if (@typeInfo(arr.child) == .optional) "≤" else "") ++ std.fmt.comptimePrint("{d}", .{arr.len}) ++ "]",
-            else => "",
-        };
-    }
-
-    pub inline fn flagString(comptime flag: Flag, variant: util.FlagType) [:0]const u8 {
+    pub inline fn flagString(comptime flag: Flag, comptime variant: enum { auto, long, short }) [:0]const u8 {
         return switch (variant) {
-            .long => "--" ++ (flag.long orelse unreachable),
-            .short => std.fmt.comptimePrint("-{u}", .{flag.short orelse unreachable}),
+            .auto => if (flag.long) |long| "--" ++ long else std.fmt.comptimePrint("-{u}", .{flag.short.?}),
+            .long => "--" ++ (flag.long.?),
+            .short => std.fmt.comptimePrint("-{u}", .{flag.short.?}),
         };
     }
 
-    pub const help: Flag = .init(FlagHelp, 'h', "help", null, "display this help", .{ .info = 
+    pub inline fn StructField(comptime flag: Flag) type {
+        return types.StructField(flag.type, .flag);
+    }
+
+    pub const help: Flag = .init(types.FlagHelp, 'h', "help", null, "display this help", .{ .info = 
         \\ The '--help' flag displays help regarding program usage.
         \\ An occurance of the '--help' flag will exit the program.
     });
+
+    pub const Extra = struct {
+        info: ?[]const u8 = null,
+        field_name: ?[:0]const u8 = null,
+        alt_type_name: ?[:0]const u8 = null,
+        aliases: []const Identifier = &.{},
+        dependencies: []const Dependency = &.{},
+    };
+
+    pub const Identifier = union(enum) {
+        long: [:0]const u8,
+        short: u21,
+
+        pub inline fn flagString(comptime ident: Identifier) []const u8 {
+            return switch (ident) {
+                .long => |text| "--" ++ text,
+                .short => |char| "-" ++ std.unicode.utf8EncodeComptime(char),
+            };
+        }
+    };
+
+    pub const Dependency = struct {
+        flag: Identifier,
+        pred: Predicate,
+        pub const Predicate = union(enum) {
+            /// Indicates that the flag containing this `Dependency` cannot be found alongside `flag`
+            /// in a sequence of command line arguments.
+            exclusive,
+            /// Indicates that the flag containing this `Dependency` must be found alongside `flag`
+            /// in a sequence of command line arguments.
+            required_present,
+            /// Indicates that an occurance of the flag containing this `Dependency` in a sequence of
+            /// command line arguments implies `flag[=value]`. If `override` is `true`, this will override
+            /// a previous occurance of `flag`.
+            implies: struct {
+                value: *const anyopaque,
+                override: bool = false,
+            },
+            requires: union(enum) {
+                @"and": []const Predicate,
+                @"or": []const Predicate,
+                eq: ?*const anyopaque,
+            },
+        };
+    };
 };
 
 pub const Positional = struct {
@@ -393,49 +342,3 @@ pub const Positional = struct {
     }
 };
 
-pub inline fn Counter(comptime T: type) type {
-    return struct {
-        pub const argz_counter_int = T;
-    };
-}
-
-pub const MultiStorage = union(enum) {
-    /// Value is the maximum number of elements that can be parsed.
-    bounded: usize,
-    dynamic,
-};
-
-pub inline fn Multi(comptime T: type, comptime _storage: MultiStorage) type {
-    return struct {
-        pub const argz_multi_tag = {};
-
-        pub const child = T;
-        pub const storage = _storage;
-    };
-}
-
-pub const TrailingPositionals = struct {
-    args: args.Args,
-    index: usize,
-
-    const Iterator = struct {
-        args: args.Args,
-        index: usize,
-
-        pub fn next(it: *Iterator) ?[]const u8 {
-            if (it.index >= it.args.len)
-                return null;
-            const arg = it.args.get(it.index);
-            it.index += 1;
-            return arg;
-        }
-    };
-
-    pub fn init(_args: args.Args, index: usize) TrailingPositionals {
-        return .{ .args = _args, .index = index };
-    }
-
-    pub fn iterator(self: *const TrailingPositionals) Iterator {
-        return .{ .args = self.args, .index = self.index };
-    }
-};

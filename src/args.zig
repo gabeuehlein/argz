@@ -1,6 +1,5 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const util = @import("util.zig");
 const Span = @import("Lexer.zig").Span;
 
 fn emptyArgsGetFn(_: *const anyopaque, _: usize) []const u8 {
@@ -54,33 +53,14 @@ pub const SystemArgs = if (builtin.link_libc) SystemArgsImpl else switch (builti
 };
 
 pub const SystemArgsImpl = struct {
-    argv: []const [*:0]const u8,
 
-    pub fn init() SystemArgsImpl {
-        return .{
-            .argv = @import("std").os.argv,
-        };
+    pub fn init() Args {
+        return .{ .v_argv_get = vArgvGet, .context = undefined, .len = std.os.argv.len };
     }
 
-    pub fn args(self: *const SystemArgsImpl) Args {
-        return .{ .v_argv_get = vArgvGet, .context = self, .len = self.argv.len };
-    }
-
-    fn vArgvGet(ctx: *const anyopaque, index: usize) []const u8 {
-        const me = @as(*const SystemArgsImpl, @ptrCast(@alignCast(ctx))).*;
-        const arg = me.argv[index];
-        const len: usize = blk: {
-            if (builtin.link_libc) {
-                // libc strlen is typically optimized better than a scalar loop
-                // for common argument lengths, so use that if we're linking against libc
-                const strlen = @cImport(@cInclude("string.h")).strlen;
-                break :blk strlen(arg);
-            } else {
-                var i = @as(usize, 0);
-                while (arg[i] != 0) : (i += 1) {}
-                break :blk i;
-            }
-        };
+    fn vArgvGet(_: *const anyopaque, index: usize) []const u8 {
+        const arg = std.os.argv[index];
+        const len: usize = std.mem.indexOfSentinel(u8, 0, arg);
         return arg[0..len];
     }
 };

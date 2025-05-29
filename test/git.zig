@@ -27,8 +27,7 @@ const cfg: argz.Config = .{
 };
 
 pub fn main() !void {
-    var argv = argz.SystemArgs.init();
-    var arg_parser: argz.Parser = try .init(argv.args(), .{
+    var arg_parser: argz.Parser = try .init(argz.SystemArgs.init(), .{
         .program_name = "git",
         .program_description = "an imitation of the Git SCM tool's CLI",
         .allocator = null,

@@ -56,7 +56,8 @@ pub fn build(b: *std.Build) !void {
 }
 
 fn createTests(b: *std.Build, step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, argz_module: *std.Build.Module) !void {
-    var dir = try std.fs.cwd().openDir("test", .{ .iterate = true });
+    const test_dir = b.path("test").getPath(b);
+    var dir = try std.fs.cwd().openDir(test_dir, .{ .iterate = true });
     defer dir.close();
     var it = dir.iterate();
     while (try it.next()) |entry| {
