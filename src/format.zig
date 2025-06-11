@@ -54,6 +54,15 @@ pub const FlagFormatFn = fn (
     anytype,
 ) anyerror!void;
 
+pub const NoCommandFormatFn = fn(
+    *Parser,
+    found_token: bool,
+    comptime top_level_config: argz.Config,
+    comptime cmd_stack: []const Command,
+    comptime current_mode: Mode,
+    comptime current_flags: []const Flag,
+) anyerror!void;
+
 pub fn formatAllFlagsDefault(
     config: std.io.tty.Config,
     comptime flags: []const Flag,
@@ -405,12 +414,45 @@ pub fn formatErrorDefault(config: std.io.tty.Config, err: Parser.Error, parser: 
             }
         },
         .no_command_provided => try emitErr(writer, config, "no command provided", .{}),
-        .custom => |data| data.handler(parser, data.context, writer, config),
+        .custom => |func| func(parser, writer, config),
     }
 }
 
+pub fn formatNoCommandDefault(
+    p: *Parser,
+    found_token: bool,
+    comptime top_level_config: argz.Config,
+    comptime cmd_stack: []const Command,
+    comptime current_mode: Mode,
+    comptime current_flags: []const Flag,
+) anyerror!void {
+    if (found_token)
+        return p.fail(.no_command_provided);
+    var stdout = std.io.getStdOut();
+    const writer = stdout.writer();
+    const config = p.stdout_config;
+    try Parser.formatters.prologue(
+        config,
+        top_level_config,
+        cmd_stack,
+        current_mode,
+        current_flags,
+        p.program_name orelse p.lexer.args.get(0),
+        p.program_description,
+        writer,
+    );
+    switch (current_mode) {
+        .positionals => {},
+        .commands => |commands| {
+            try Parser.formatters.commands(config, commands, writer);
+        },
+    }
+    try Parser.formatters.flags(config, current_flags, writer);
+    std.process.exit(0);
+}
+
 /// Only returns strings for long flag aliases. All command aliases are returned.
-pub fn getAliasStrings(comptime cmd_or_flag: anytype) []const [:0]const u8 {
+pub inline fn getAliasStrings(comptime cmd_or_flag: anytype) []const [:0]const u8 {
     switch (@TypeOf(cmd_or_flag)) {
         Command => return cmd_or_flag.aliases,
         Flag => {

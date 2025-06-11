@@ -9,17 +9,46 @@ const Parser = @import("../Parser.zig");
 /// use either data from the argument provided or will allocate the result on the heap when needed. This logic
 /// is consistent with [Parser.deinit]; if you are straying from this logic, do not use [Parser.deinit] or
 /// this function.
-pub fn parseValueAuto(comptime T: type, data: anytype, parser: *Parser, string: []const u8, comptime env: Parser.Environment, comptime depth: u32) !void {
-    if (types.custom.isCustomType(T, env.context)) {
-        try T.parseWithContext(env, string, parser, data, depth);
+pub fn parseValueAuto(comptime T: type, data_ptr: anytype, parser: *Parser, opt_string: ?[]const u8, comptime context: Parser.Context, comptime depth: u32) !void {
+    if (types.isCustomType(T)) {
+        const data = types.customTypeData(T);
+        try data.parseWithContext(context, parser, data_ptr, depth);
         return;
     }
 
-    if (types.requiresAllocator(T)) {
+    switch (@typeInfo(T)) {
+        .optional => |opt_info| {
+            if (opt_string == null and parser.lexer.maybe(&.{ .flag_eq }) == null) {
+                data_ptr.* = null;
+                return;
+            }
+
+            if (types.isCustomType(opt_info.child)) {
+                if (opt_string) |extra| {
+                    const log = std.log.scoped(.argz);
+                    log.warn("Received extra string '{s}' that will be unused for parsing type '{s}'. This is likely a bug and may result in unexpected behavior.", .{
+                        extra,
+                        @typeName(T),
+                    });
+                }
+                const data = types.customTypeData(T);
+                var space: data.ResolveType(context) = undefined;
+                try data.parseWithContext(context, parser, &space, depth);
+                data_ptr.* = space;
+                return;
+            }
+        },
+        else => {},
+    }
+
+    const string = opt_string orelse try parser.lexer.argument(types.supportsLeadingDash(T, context));
+    if (types.requiresAllocator(T, context)) {
         const allocator = parser.allocator orelse @panic("A memory allocator is required to parse '" ++ @typeName(T) ++ "' but one was not provided. This is a bug");
-        data.* = parseValueAlloc(T, allocator, env.context, parser, string, depth) catch |e| switch (e) {
-            error.OutOfMemory, error.ParseError => return e,
-            else => switch (env.context) {
+        data_ptr.* = parseValueAlloc(T, allocator, context, parser, string, depth) catch |e| {
+            if (e == error.OutOfMemory)
+                return e;
+
+            switch (context) {
                 .flag => |context_info| {
                     return parser.fail(.{ .invalid_arg_for_flag = .{
                         .arg_string = string,
@@ -37,7 +66,7 @@ pub fn parseValueAuto(comptime T: type, data: anytype, parser: *Parser, string: 
             }
         };
     } else {
-        data.* = parseValueNoAlloc(T, env.context, parser, string, depth) catch |e| switch (e) {
+        data_ptr.* = parseValueNoAlloc(T, context, parser, string, depth) catch |e| switch (e) {
             error.ParseError => return e,
         };
     }
@@ -156,15 +185,16 @@ pub fn parseValueAlloc(comptime T: type, gpa: Allocator, context: Parser.Context
     };
 }
 
-pub inline fn deinitValueAuto(comptime T: type, comptime context: Parser.Context.Tag, parser: *Parser, val: *types.StructField(T, context)) void {
-    if (types.custom.isCustomType(T, context)) {
-        T.deinitWithContext(context, parser, val);
-    } else if (types.requiresAllocator(T)) {
+pub inline fn deinitValueAuto(comptime T: type, comptime context: Parser.Context, parser: *Parser, val: *types.StructField(T, context)) void {
+    if (types.isCustomType(T)) {
+        const data = types.customTypeData(T);
+        data.deinitWithContext(context, parser, val);
+    } else if (comptime types.requiresAllocator(T, context)) {
         parser.allocator.?.free(val.*);
     }
 }
 
-fn genericInvalidArgError(context: Parser.Context, parser: *Parser, string: []const u8) error{ParseError} {
+inline fn genericInvalidArgError(comptime context: Parser.Context, parser: *Parser, string: []const u8) error{ParseError} {
     return switch (context) {
         .flag => |info| parser.fail(.{
             .invalid_arg_for_flag = .{

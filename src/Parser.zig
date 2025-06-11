@@ -35,13 +35,15 @@ pub const Options = struct {
 };
 
 pub const Formatters = struct {
-    flags: *const format.AllFlagsFormatFn = format.formatAllFlagsDefault,
-    commands: *const format.AllCommandsFormatFn = format.formatAllCommandsDefault,
-    prologue: *const format.PrologueFormatFn = format.formatPrologueDefault,
-    errors: *const format.ErrorFormatFn = format.formatErrorDefault,
+    flags: format.AllFlagsFormatFn = format.formatAllFlagsDefault,
+    commands: format.AllCommandsFormatFn = format.formatAllCommandsDefault,
+    prologue: format.PrologueFormatFn = format.formatPrologueDefault,
+    errors: format.ErrorFormatFn = format.formatErrorDefault,
+    no_command_provided: format.NoCommandFormatFn = format.formatNoCommandDefault,
 };
 
 pub const formatters: Formatters = blk: {
+    // TODO check module options so default formatters can be overwritten by user code
     var result: Formatters = .{};
     _ = &result;
     break :blk result;
@@ -127,34 +129,36 @@ pub const Error = union(enum) {
     missing_positionals: []const []const u8,
     no_command_provided,
     /// Payload is the handler.
-    custom: struct {
-        context: Context,
-        handler: *const fn(*Parser, Context, std.io.AnyWriter, TtyConfig) void,
-    },
+    custom: *const fn(*Parser, std.io.AnyWriter, TtyConfig) void,
 
-    pub fn fmt(context: Context, comptime format_string: []const u8, args: anytype) Error {
-        // FIXME: this hack is incredibly wasteful with respect to binary size.
-        // *Each* call to `fmt` needs to reserve 4096 bytes, which will add up quickly.
-        // Ideally, only one buffer would be needed (but this would introduce other problems, such as
-        // returning errors within errors overwriting buffer contents if unchecked!).
-        const S = struct {
-            pub var buf: [4096]u8 = undefined;
-            pub var formatted: []u8 = undefined;
+    var error_buffer: [4096]u8 = undefined;
+    var error_format_string: []u8 = undefined;
+    // This is atomic in the case that a poorly implemented custom type
+    // returns parser errors from multiple threads at the same time.
+    var error_buffer_initialized: std.atomic.Value(bool) = .init(false);
 
-            fn func(_: *Parser, _: Context, writer: std.io.AnyWriter, config: TtyConfig) void {
+    pub fn fmt(comptime format_string: []const u8, args: anytype) Error {
+        assert(error_buffer_initialized.cmpxchgStrong(false, true, .seq_cst, .seq_cst) == null);
+
+        const func = struct {
+            fn func(_: *Parser, writer: std.io.AnyWriter, config: TtyConfig) void {
                 config.setColor(writer, .bold) catch {};
                 config.setColor(writer, .red) catch {};
                 writer.writeAll("error:") catch {};
                 config.setColor(writer, .reset) catch {};
                 writer.writeByte(' ') catch {};
-                writer.writeAll(formatted) catch {};
+                writer.writeAll(error_format_string) catch {};
                 writer.writeByte('\n') catch {};
             }
+        }.func;
+
+        error_format_string = std.fmt.bufPrint(&error_buffer, format_string, args) catch blk: {
+            const truncated_msg = "<truncated>...";
+            @memcpy(error_buffer[error_buffer.len-truncated_msg.len..], truncated_msg);
+            break :blk &error_buffer;
         };
 
-        S.formatted = std.fmt.bufPrint(&S.buf, format_string, args) catch @panic("TODO: truncate long error messages");
-
-        return .{ .custom = .{ .context = context, .handler = &S.func } };
+        return .{ .custom = &func };
     }
 };
 
@@ -201,6 +205,7 @@ pub fn parseInner(p: *Parser, comptime mode: Mode, comptime flags: []const Flag,
         }
         break :blk .{ longs, shorts };
     };
+    const start_index = p.lexer.argi;
     errdefer {
         flags: {
             if (comptime flags.len == 0)
@@ -473,7 +478,11 @@ pub fn parseInner(p: *Parser, comptime mode: Mode, comptime flags: []const Flag,
                 }
             }
         },
-        .commands => if (!found_command) return p.fail(.no_command_provided),
+        .commands => if (!found_command) {
+            const found_token = p.lexer.argi > start_index;
+            try formatters.no_command_provided(p, found_token, command_stack, mode, flags);
+            return p.fail(.no_command_provided);
+        },
     }
 
     // TODO I'm guessing this doesn't work.

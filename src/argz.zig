@@ -342,3 +342,10 @@ pub const Positional = struct {
     }
 };
 
+pub const Pair = @import("types/pair.zig").Pair;
+pub const Counter = @import("types/counter.zig").Counter;
+
+comptime {
+    _ = Pair;
+    _ = Counter;
+}

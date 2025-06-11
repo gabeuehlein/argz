@@ -51,6 +51,7 @@ pub fn build(b: *std.Build) !void {
     }
 
     const test_step = b.step("test", "run tests");
+    test_step.dependOn(&lib.step);
     createTests(b, test_step, target, optimize, argz_module) catch |e| std.debug.panic("running tests failed: {s}", .{@errorName(e)});
     b.getInstallStep().dependOn(&install_docs.step);
 }
@@ -93,6 +94,7 @@ fn buildTest(b: *std.Build, step: *std.Build.Step, target: std.Build.ResolvedTar
     });
     test_exe.root_module.addImport("argz", argz_module);
     const exe = b.addRunArtifact(test_exe);
+    var expected_exit_code: u8 = 0;
     while (true) {
         defer line_buf.clearRetainingCapacity();
         try f_reader.readUntilDelimiterArrayList(&line_buf, '\n', std.math.maxInt(usize));
@@ -106,9 +108,11 @@ fn buildTest(b: *std.Build, step: *std.Build.Step, target: std.Build.ResolvedTar
         } else if (std.mem.startsWith(u8, line, "// expected(stderr):")) {
             const rest = line["// expected(stderr):".len..];
             try tokenizeExpectedString(rest, file, &stderr_expected_string);
+        } else if (std.mem.eql(u8, line, "// expect-fail")) {
+            expected_exit_code = 1;
         } else break;
     }
-    exe.expectExitCode(0);
+    exe.expectExitCode(expected_exit_code);
     step.dependOn(&exe.step);
     // While it would be nice to test color output, I don't feel like
     // hand-writing all of the ANSI escape sequences.

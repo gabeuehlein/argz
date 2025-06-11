@@ -211,18 +211,16 @@ test Lexer {
         "--bar=foo",
         "foobar",
         "-qwerty=99",
-        "",
         "--",
         "--these",
         "-are",
         "--not",
-        "",
         "--flags",
     };
     var sys_args = argz.OwnedArgs.init(argv);
     const args = sys_args.args();
     var lexer = try Lexer.init(args);
     while (lexer.nextToken()) |tok| {
-        std.log.err("{any}", .{tok});
+        assert(tok != .err);
     }
 }
