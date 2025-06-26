@@ -1,6 +1,5 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const Span = @import("Lexer.zig").Span;
 
 fn emptyArgsGetFn(_: *const anyopaque, _: usize) []const u8 {
     unreachable;
@@ -20,18 +19,12 @@ pub const Args = struct {
     pub fn get(args: Args, index: usize) []const u8 {
         return args.v_argv_get(args.context, index);
     }
-
-    pub fn getSpanText(args: Args, span: Span) []const u8 {
-        std.debug.assert(@intFromEnum(span.argv_index) < args.len);
-        const arg = span.argv_index.get(args);
-        return arg[span.start..span.end];
-    }
 };
 
 pub const OwnedArgs = struct {
-    argv: []const [:0]const u8,
+    argv: []const []const u8,
 
-    pub fn init(argv: []const [:0]const u8) OwnedArgs {
+    pub fn init(argv: []const []const u8) OwnedArgs {
         return .{ .argv = argv };
     }
 
@@ -45,7 +38,7 @@ pub const OwnedArgs = struct {
     }
 };
 
-// TODO is there a better name for this?
+/// Uses arguments from `std.os.argv`. Non-allocating (from a user's perspective), null-terminated.
 pub const SystemArgs = if (builtin.link_libc) SystemArgsImpl else switch (builtin.os.tag) {
     .windows => @compileError("SystemArgs isn't supported on Windows without libc; use OwnedArgs instead"),
     .wasi => @compileError("SystemArgs isn't supported on WASI without libc; use OwnedArgs instead"),
@@ -53,7 +46,6 @@ pub const SystemArgs = if (builtin.link_libc) SystemArgsImpl else switch (builti
 };
 
 pub const SystemArgsImpl = struct {
-
     pub fn init() Args {
         return .{ .v_argv_get = vArgvGet, .context = undefined, .len = std.os.argv.len };
     }
