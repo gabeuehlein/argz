@@ -2,8 +2,8 @@ pub inline fn Pair(comptime First: type, comptime Second: type, comptime separat
     return struct {
         pub const Target = struct { First, Second };
 
-        pub const argz_custom_type_data: CustomTypeData = .{
-            .ResolveType = CustomTypeData.always(@as(?type, Target)),
+        pub const argz_custom_type_data: CustomTypeMetadata = .{
+            .ResolveType = CustomTypeMetadata.always(@as(?type, Target)),
 
             .initWithDefaultValue = struct {
                 inline fn func(comptime _: Parser.Context.Tag, data_ptr: anytype) bool {
@@ -11,8 +11,6 @@ pub inline fn Pair(comptime First: type, comptime Second: type, comptime separat
                     return false;
                 }
             }.func,
-
-            .requiresAllocator = requiresAllocator,
 
             .parseWithContext = struct {
                 fn func(comptime context: Parser.Context, p: *Parser, data_ptr: anytype, comptime depth: u32) anyerror!void {
@@ -51,11 +49,11 @@ pub inline fn Pair(comptime First: type, comptime Second: type, comptime separat
             return types.requiresAllocator(First, context) or types.requiresAllocator(Second, context);
         }
 
-        const first_custom_data: ?CustomTypeData = if (types.isCustomType(First))
+        const first_custom_data: ?CustomTypeMetadata = if (types.isCustomType(First))
             types.customTypeData(First)
         else null;
 
-        const second_custom_data: ?CustomTypeData = if (types.isCustomType(Second))
+        const second_custom_data: ?CustomTypeMetadata = if (types.isCustomType(Second))
             types.customTypeData(Second)
         else null;
 
@@ -73,6 +71,7 @@ pub inline fn Pair(comptime First: type, comptime Second: type, comptime separat
 }
 
 test Pair {
+    // TODO also test failures
     const context: Parser.Context = .{ .flag = .{
         .flag_string = "--test",
         .flag_ty_string = "pair",
@@ -110,7 +109,7 @@ test Pair {
             "false=false",
             "true=true",
             "false=foiejrofiejrfoierjfoierjfoierjfoerjfoie",
-            "false=foijerogh2tuonwpgneqoivqwprfjwroug", 
+            "false", 
         } },
     }) |packed_data| {
         const PairTy, const successes = packed_data;
@@ -128,7 +127,7 @@ test Pair {
 }
 
 const Parser = @import("../Parser.zig");
-const CustomTypeData = @import("../CustomTypeData.zig");
+const CustomTypeMetadata = @import("../CustomTypeMetadata.zig");
 const std = @import("std");
 const types = @import("../types.zig");
 const assert = std.debug.assert;

@@ -63,7 +63,7 @@ pub const NoCommandFormatFn = fn(
     comptime current_flags: []const Flag,
 ) anyerror!void;
 
-pub fn formatAllFlagsDefault(
+pub fn formatAllFlags(
     config: std.io.tty.Config,
     comptime flags: []const Flag,
     writer: std.io.AnyWriter,

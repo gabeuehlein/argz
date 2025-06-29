@@ -8,32 +8,63 @@ const Operator = enum {
     div,
 };
 
-const config: argz.Config = .{
-    .mode = .{ .positionals = &.{} },
-    .top_level_flags = &.{
-        .help,
-        .init([4]?Operator, null, "operators", .{ .add, .sub, .mul, .div }, "a list of arithmetic operators to make questions with", .{ .alt_type_name = "OPERATOR" }),
-        .init(i32, null, "min", -10, "the smallest number that a question can have", .{}),
-        .init(i32, null, "max", 10, "the largest number that a question can have", .{}),
-        .init(u32, 'n', "num-questions", 20, "the number of questions to ask", .{}),
-    },
-    .support_allocation = false,
+const cli = struct {
+    pub const flags = [_]argz.Flag{
+        .init(i32, "max", .{ .long = "max", .help_msg = "the largest number that a question can have", .required = false }),
+        .init(i32, "min", .{ .long = "min", .help_msg = "the smallest number that a question can have", .required = false }),
+        .init(u32, "num_questions", .{
+            .short = 'n',
+            .long = "num_questions",
+            .help_msg = "the number of questions",
+            .required = false,
+        }),
+        .init(Operator, "operator", .{
+            .short = 'o',
+            .long = "operator",
+            .help_msg = "add a possible operator to be used in a question",
+            .required = false,
+            .repeatable = true,
+        }),
+    };
+
+    pub const positionals = [0]argz.Positional{};
+
+    pub const Context = argz.Parser.ParseContext(&flags, &positionals);
 };
 
 pub fn main() !void {
+    var max: i32 = 10;
+    var min: i32 = -10;
+    var num_questions: u32 = 20;
+    var operators: std.BoundedArray(Operator, std.meta.fields(Operator).len) = .{ .buffer = undefined, .len = 0 };
+
     var p = try argz.Parser.init(argz.SystemArgs.init(), .{
-        .program_name = "math",
-        .program_description = "math",
+        .program_name = "math-test",
+        .program_description = "example program offering arithmetic quizzes",
     });
-    const args = try p.parse(config);
+    var context = cli.Context{};
+    while (try p.nextArg(&cli.flags, &cli.positionals, &context)) |arg| {
+        switch (arg) {
+            .flag => |flag| switch (flag) {
+                .max => |m| max = m,
+                .min => |m| min = m,
+                .num_questions => |n| num_questions = n,
+                .operator => |o| {
+                    if (std.mem.indexOfScalar(Operator, operators.constSlice(), o) != null)
+                        p.fatal("cannot add operator '{s}' multiple times", .{@tagName(o)});
+                    operators.appendAssumeCapacity(o);
+                },
+            },
+            .positional => unreachable,
+        }
+    }
+    try context.checkRequirements(&p);
 
-    if (args.flags.min > args.flags.max)
-        p.fatal("minimum value ({d}) must be greater than maximum value ({d})", .{ args.flags.min, args.flags.max });
+    if (operators.len == 0)
+        operators = @TypeOf(operators).fromSlice(&.{ .add, .sub, .mul, .div }) catch unreachable;
 
-    const ops = args.flags.operators;
-    const null_index = std.mem.indexOfScalar(?Operator, &ops, null) orelse ops.len;
-    if (null_index == 0)
-        p.fatal("at least one operator must be provided", .{});
+    if (min > max)
+        p.fatal("minimum value ({d}) must be greater than maximum value ({d})", .{ min, max });
 
     var stdout = std.io.getStdOut();
     const out = stdout.writer();
@@ -45,18 +76,18 @@ pub fn main() !void {
 
     var question_no: u32 = 1;
     var question_input: [4096]u8 = undefined;
-    while (question_no <= args.flags.@"num-questions") : (question_no += 1) {
-        const index = rng.intRangeAtMost(usize, 0, null_index - 1);
-        const op = ops[index].?;
-        const a = rng.intRangeAtMost(i32, args.flags.min, args.flags.max);
-        const b = rng.intRangeAtMost(i32, args.flags.min, args.flags.max);
+    while (question_no <= num_questions) : (question_no += 1) {
+        const index = rng.intRangeAtMost(usize, 0, operators.len - 1);
+        const op = operators.buffer[index];
+        const a = rng.intRangeAtMost(i32, min, max);
+        const b = rng.intRangeAtMost(i32, min, max);
         try out.print("Question {d}: {d} {s} {d} = ", .{ question_no, a, switch (op) {
             .add => "+",
             .sub => "-",
             .mul => "*",
             .div => "/",
         }, b });
-        const answer = (in.readUntilDelimiterOrEof(&question_input, '\n') catch |e| return p.fatal("couldn't read answer: {s}\n", .{@errorName(e)})) orelse break;
+        const answer = (in.readUntilDelimiterOrEof(&question_input, '\n') catch |e| p.fatal("couldn't read answer: {s}\n", .{@errorName(e)})) orelse break;
         if (b == 0 and op == .div) {
             if (std.ascii.eqlIgnoreCase(answer, "undefined"))
                 try out.writeAll("Correct!\n")

@@ -6,13 +6,13 @@ const Args = @import("args.zig").Args;
 const argz = @import("argz.zig");
 const Parser = @import("Parser.zig");
 const values = @import("Parser/values.zig");
-const CustomTypeData = @import("CustomTypeData.zig");
+const CustomTypeMetadata = @import("CustomTypeMetadata.zig");
 
 pub inline fn isCustomType(comptime T: type) bool {
-    return @typeInfo(T) == .@"struct" and @hasDecl(T, "argz_custom_type_data") and @TypeOf(T.argz_custom_type_data) == CustomTypeData;
+    return @typeInfo(T) == .@"struct" and @hasDecl(T, "argz_custom_type_data") and @TypeOf(T.argz_custom_type_data) == CustomTypeMetadata;
 }
 
-pub inline fn customTypeData(comptime T: type) CustomTypeData {
+pub inline fn customTypeData(comptime T: type) CustomTypeMetadata {
     comptime assert(isCustomType(T));
     return T.argz_custom_type_data;
 }
@@ -30,10 +30,10 @@ pub inline fn supportsLeadingDash(comptime T: type, comptime context: Parser.Con
     };
 }
 
-pub fn StructField(comptime T: type, context: Parser.Context.Tag) type {
+pub fn ResolveType(comptime T: type, context: Parser.Context.Tag) type {
     if (comptime isCustomType(T)) {
         const data = customTypeData(T);
-        return data.ResolveType(context) orelse @compileError("type '" ++ @typeName(T) ++ "' cannot exist in a struct in a context of '" ++ @tagName(context) ++ "'");
+        return data.Resolve(context) orelse @compileError("type '" ++ @typeName(T) ++ "' cannot exist in a struct in a context of '" ++ @tagName(context) ++ "'");
     }
     else switch (@typeInfo(T)) {
         .int, .float, .bool, => return T,
@@ -62,7 +62,7 @@ pub fn StructField(comptime T: type, context: Parser.Context.Tag) type {
         .optional => |info| {
             if (@typeInfo(info.child) == .optional)
                 @compileError("nested optionals are not allowed");
-            return ?StructField(info.child, context); 
+            return ?ResolveType(info.child, context); 
         },
         .pointer => |info| {
             if (info.size != .slice)
@@ -91,6 +91,7 @@ pub fn StructField(comptime T: type, context: Parser.Context.Tag) type {
                 @compileError("type 'void' is only legal in the context of a flag");
             return bool;
         },
+        .@"enum" => return T,
         else => @compileError("type '" ++ @typeName(T) ++ "' is not legal in argz"),
     }
 }
@@ -137,7 +138,7 @@ pub inline fn typeName(comptime T: type, comptime context: Parser.Context.Tag, c
             assert(info.fields.len != 0);
             if (info.fields.len > 5)
                 break :blk @typeName(T);
-            comptime var string: []const u8 = info.fields[0].name;
+            comptime var string: [:0]const u8 = info.fields[0].name;
         inline for (info.fields[1..]) |field| {
                 string = string ++ " | " ++ field.name;
             }
@@ -145,7 +146,7 @@ pub inline fn typeName(comptime T: type, comptime context: Parser.Context.Tag, c
                 string = "(" ++ string ++ ")";
             break :blk string;
         },
-        .optional => |info| (typeName(info.child, context, depth + 1) orelse return null),
+        .optional => |info| "?" ++ (typeName(info.child, context, depth + 1) orelse return null),
         else => blk: {
             break :blk @typeName(T);
         },
@@ -157,7 +158,7 @@ pub fn StructFromFlags(comptime flags: []const argz.Flag) type {
     comptime var fields: [flags.len]std.builtin.Type.StructField = undefined;
     inline for (flags, 0..) |flag, i| {
         fields[i] = std.builtin.Type.StructField{
-            .type = StructField(flag.type, .flag),
+            .type = ResolveType(flag.type, .flag),
             .alignment = 0,
             .default_value_ptr = flag.default_value_ptr,
             .is_comptime = false,
@@ -172,91 +173,3 @@ pub fn StructFromFlags(comptime flags: []const argz.Flag) type {
         .layout = .auto,
     } });
 }
-
-pub fn TypeFromMode(comptime mode: argz.Mode) type {
-    const Type = std.builtin.Type;
-    switch (mode) {
-        .commands => |commands| {
-            comptime var union_fields: [commands.len]Type.UnionField = undefined;
-            inline for (commands, 0..) |cmd, i| {
-                union_fields[i] = cmd.ToType();
-            }
-            return 
-                @Type(.{ .@"union" = .{
-                    .layout = .auto,
-                    .fields = &union_fields,
-                    .decls = &.{},
-                } });
-        },
-        .positionals => |positionals| {
-            comptime var struct_fields: [positionals.len]Type.StructField = undefined;
-            inline for (positionals, 0..) |positional, i| {
-                struct_fields[i] = StructField(positional.type, .positional);
-            }
-            return 
-                @Type(.{ .@"struct" = .{
-                    .layout = .auto,
-                    .fields = &struct_fields,
-                    .decls = &.{},
-                    .is_tuple = false,
-                } });
-        },
-    }
-}
-
-pub fn WrapModeAndFlags(comptime mode: argz.Mode, comptime flags: []const argz.Flag) type {
-    const FlagsType = StructFromFlags(flags);
-    switch (mode) {
-        .commands => |commands| {
-            comptime var union_fields: [commands.len]std.builtin.Type.UnionField = undefined;
-            comptime var enum_fields: [commands.len]std.builtin.Type.EnumField = undefined;
-            inline for (commands, 0..) |cmd, i| {
-                union_fields[i] = std.builtin.Type.UnionField{
-                    .type = cmd.ToType(),
-                    .name = cmd.fieldName(),
-                    .alignment = 0,
-                };
-                enum_fields[i] = .{ .name = cmd.fieldName(), .value = i };
-            }
-            const as_const = union_fields;
-            const enum_fields_as_const = enum_fields;
-            return struct {
-                command: @Type(.{ .@"union" = .{
-                    .layout = .auto,
-                    .fields = &as_const,
-                    .decls = &.{},
-                    .tag_type = @Type(.{ .@"enum" = std.builtin.Type.Enum{
-                        .fields = &enum_fields_as_const,
-                        .tag_type = std.math.IntFittingRange(0, commands.len),
-                        .decls = &.{},
-                        .is_exhaustive = true,
-                    } }),
-                } }),
-                flags: FlagsType,
-            };
-        },
-        .positionals => |positionals| {
-            comptime var struct_fields: [positionals.len]std.builtin.Type.StructField = undefined;
-            inline for (positionals, 0..) |positional, i| {
-                struct_fields[i] = std.builtin.Type.StructField{
-                    .type = StructField(positional.type, .positional),
-                    .default_value_ptr = null,
-                    .alignment = 0,
-                    .is_comptime = false,
-                    .name = positional.fieldName(),
-                };
-            }
-            const as_const = struct_fields;
-            return struct {
-                positionals: @Type(.{ .@"struct" = .{
-                    .layout = .auto,
-                    .fields = &as_const,
-                    .decls = &.{},
-                    .is_tuple = false,
-                } }),
-                flags: FlagsType,
-            };
-        },
-    }
-}
-

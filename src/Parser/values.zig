@@ -9,39 +9,13 @@ const Parser = @import("../Parser.zig");
 /// use either data from the argument provided or will allocate the result on the heap when needed. This logic
 /// is consistent with [Parser.deinit]; if you are straying from this logic, do not use [Parser.deinit] or
 /// this function.
-pub fn parseValueAuto(comptime T: type, data_ptr: anytype, parser: *Parser, opt_string: ?[]const u8, comptime context: Parser.Context, comptime depth: u32) !void {
+pub fn parseValueAuto(comptime T: type, data_ptr: anytype, parser: *Parser, string: []const u8, comptime context: Parser.Context, comptime depth: u32) !void {
     if (types.isCustomType(T)) {
         const data = types.customTypeData(T);
         try data.parseWithContext(context, parser, data_ptr, depth);
         return;
     }
 
-    switch (@typeInfo(T)) {
-        .optional => |opt_info| {
-            if (opt_string == null and parser.lexer.maybe(&.{ .flag_eq }) == null) {
-                data_ptr.* = null;
-                return;
-            }
-
-            if (types.isCustomType(opt_info.child)) {
-                if (opt_string) |extra| {
-                    const log = std.log.scoped(.argz);
-                    log.warn("Received extra string '{s}' that will be unused for parsing type '{s}'. This is likely a bug and may result in unexpected behavior.", .{
-                        extra,
-                        @typeName(T),
-                    });
-                }
-                const data = types.customTypeData(T);
-                var space: data.ResolveType(context) = undefined;
-                try data.parseWithContext(context, parser, &space, depth);
-                data_ptr.* = space;
-                return;
-            }
-        },
-        else => {},
-    }
-
-    const string = opt_string orelse try parser.lexer.argument(types.supportsLeadingDash(T, context));
     if (types.requiresAllocator(T, context)) {
         const allocator = parser.allocator orelse @panic("A memory allocator is required to parse '" ++ @typeName(T) ++ "' but one was not provided. This is a bug");
         data_ptr.* = parseValueAlloc(T, allocator, context, parser, string, depth) catch |e| {
@@ -114,9 +88,7 @@ pub fn parseValueNoAlloc(comptime T: type, comptime context: Parser.Context, par
             return genericInvalidArgError(context, parser, string);
         },
         .@"enum" => {
-            if (context == .flag)
-                _ = parser.lexer.maybe(&.{.flag_eq});
-            return std.meta.stringToEnum(T, string) orelse error.UnknownEnumValue;
+            return std.meta.stringToEnum(T, string) orelse parser.fail("invalid enum value", .{});
         },
         .vector => |info| {
             var result: T = undefined;
@@ -185,30 +157,9 @@ pub fn parseValueAlloc(comptime T: type, gpa: Allocator, context: Parser.Context
     };
 }
 
-pub inline fn deinitValueAuto(comptime T: type, comptime context: Parser.Context, parser: *Parser, val: *types.StructField(T, context)) void {
-    if (types.isCustomType(T)) {
-        const data = types.customTypeData(T);
-        data.deinitWithContext(context, parser, val);
-    } else if (comptime types.requiresAllocator(T, context)) {
-        parser.allocator.?.free(val.*);
-    }
-}
-
 inline fn genericInvalidArgError(comptime context: Parser.Context, parser: *Parser, string: []const u8) error{ParseError} {
     return switch (context) {
-        .flag => |info| parser.fail(.{
-            .invalid_arg_for_flag = .{
-                .arg_string = string,
-                .arg_ty_string = info.flag_ty_string,
-                .flag_string = info.flag_string,
-            },
-        }),
-        .positional => |info| parser.fail(.{
-            .invalid_positional = .{
-                .arg_string = string,
-                .arg_ty_string = info.positional_ty_string,
-                .positional_display_name = info.positional_display,
-            },
-        }),
+        .flag => |info| parser.fail("invalid argument '{s}' for flag '{s}'", .{string, info.repr.toStringComptime()}),
+        .positional => |info| parser.fail("invalid argument '{s}' for poositional '{s}'", .{string, info.display}),
     };
 }

@@ -3,7 +3,7 @@ pub inline fn Counter(comptime T: type) type {
         @compileError("only runtime ints are supported by Counter");
     return struct {
         t: T,
-        pub const argz_custom_type_data: CustomTypeData = .{
+        pub const argz_custom_type_data: CustomTypeMetadata = .{
             .ResolveType = struct {
                 inline fn func(comptime context: Parser.Context.Tag) ?type {
                     return switch (context) {
@@ -23,14 +23,7 @@ pub inline fn Counter(comptime T: type) type {
                 }
             }.func, 
 
-            .requiresAllocator = CustomTypeData.always(false),
-            .repeatable = CustomTypeData.always(true),
-            .allowsLeadingDash = struct {
-                inline fn func(comptime context: Parser.Context.Tag) bool {
-                    comptime assert(context == .flag);
-                    return @typeInfo(T).int.signedness == .signed;
-                }
-            }.func,
+            .repeatable = CustomTypeMetadata.always(true),
         };
     };
 }
@@ -85,6 +78,6 @@ test Counter {
 
 const std = @import("std");
 const Parser = @import("../Parser.zig");
-const CustomTypeData = @import("../CustomTypeData.zig");
+const CustomTypeMetadata = @import("../CustomTypeMetadata.zig");
 const types = @import("../types.zig");
 const assert = std.debug.assert;
