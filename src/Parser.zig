@@ -11,7 +11,7 @@ const Positional = argz.Positional;
 const Allocator = std.mem.Allocator;
 const Args = @import("args.zig").Args;
 const fmt = @import("format.zig");
-const types=  @import("types.zig");
+const types = @import("types.zig");
 
 const TtyConfig = std.io.tty.Config;
 
@@ -25,7 +25,7 @@ pub const Options = struct {
     /// The name of the program that will be shown in descriptive help strings.
     program_name: ?[]const u8 = null,
     /// A brief description of how the program should be used.
-     program_description: ?[]const u8 = null,
+    program_description: ?[]const u8 = null,
     /// Gives a hint to error handlers that they should attempt to
     /// make suggestions to users to correct invalid inputs.
     make_suggestions: bool = true,
@@ -35,18 +35,18 @@ pub const Options = struct {
 pub const Context = union(enum) {
     pub const Tag = std.meta.Tag(@This());
 
-   flag: struct {
-       repr: union(enum) {
-           long: []const u8,
-           short: u21,
+    flag: struct {
+        repr: union(enum) {
+            long: []const u8,
+            short: u21,
 
-           pub inline fn toStringComptime(comptime repr: @This()) [:0]const u8 {
-               return switch (repr) {
-                   .long => |l| "--" ++ l,
-                   .short => |s| "-" ++ std.unicode.utf8EncodeComptime(s),
-               };
-           }
-       },
+            pub inline fn toStringComptime(comptime repr: @This()) [:0]const u8 {
+                return switch (repr) {
+                    .long => |l| "--" ++ l,
+                    .short => |s| "-" ++ std.unicode.utf8EncodeComptime(s),
+                };
+            }
+        },
         ty_string: ?[:0]const u8,
     },
     positional: struct {
@@ -56,7 +56,7 @@ pub const Context = union(enum) {
 };
 
 pub const ColorMode = enum(u2) {
-    /// Don't emit color even if stdout/stderr support them. 
+    /// Don't emit color even if stdout/stderr support them.
     disable,
     /// Enable colored output if stdout/stderr support them.
     detect,
@@ -74,7 +74,6 @@ make_suggestions: bool = true,
 found_stop: bool,
 allocator: ?Allocator,
 tokenizer: Tokenizer,
-
 
 pub fn init(args: Args, options: Options) !Parser {
     const stdout_color, const stderr_color = switch (options.color_mode) {
@@ -102,17 +101,17 @@ pub fn nextArg(
     comptime flags: []const Flag,
     comptime positionals: []const Positional,
     context: *ParseContext(flags, positionals),
-) error{ParseError,OutOfMemory}!?NextArgReturnType(flags, positionals) {
+) error{ ParseError, OutOfMemory }!?NextArgReturnType(flags, positionals) {
     if (p.found_stop) {
         const word = p.tokenizer.skip() orelse return null;
         if (comptime positionals.len == 0)
             return p.fail("found extra positional '{s}'", .{word});
         switch (context.positional_index) {
-            inline positionals.len => {
-                return p.handlePositional(NextArgReturnType(flags, positionals), positionals[positionals.len - 1], word);
-            },
             inline 0...positionals.len - 1 => |i| {
                 return p.handlePositional(NextArgReturnType(flags, positionals), positionals[i], word);
+            },
+            inline positionals.len => {
+                return p.handlePositional(NextArgReturnType(flags, positionals), positionals[positionals.len - 1], word);
             },
             else => unreachable,
         }
@@ -149,16 +148,17 @@ pub fn nextArg(
             return p.fail("unknown flag '-{u}'", .{short});
         },
         .word => |word| {
+            const index = context.positional_index;
             try context.foundPositional(p, word);
             if (comptime positionals.len == 0)
                 unreachable; // context.foundPositional checks if no positionals exist
 
-            switch (context.positional_index) {
+            switch (index) {
                 inline positionals.len => {
-                    return p.handlePositional(NextArgReturnType(flags, positionals), positionals[positionals.len - 1], word);
+                    return try p.handlePositional(NextArgReturnType(flags, positionals), positionals[positionals.len - 1], word);
                 },
                 inline 0...positionals.len - 1 => |i| {
-                    return p.handlePositional(NextArgReturnType(flags, positionals), positionals[i], word);
+                    return try p.handlePositional(NextArgReturnType(flags, positionals), positionals[i], word);
                 },
                 else => unreachable,
             }
@@ -171,34 +171,35 @@ pub fn nextArg(
     }
 }
 
-fn handlePositional(p: *Parser, comptime ReturnType: type, comptime positional: Positional, word: []const u8) error{ParseError,OutOfMemory}!ReturnType {
+fn handlePositional(p: *Parser, comptime ReturnType: type, comptime positional: Positional, word: []const u8) error{ ParseError, OutOfMemory }!?ReturnType {
     const ToParse = positional.Resolve();
     var space: ToParse = undefined;
-    try values.parseValueAuto(ToParse, &space, p, word, .{ .positional = .{
+    try values.parseValueAuto(positional.type, &space, p, word, .{ .positional = .{
         .display = positional.display,
         .ty_string = types.typeName(positional.type, .positional, 0),
     } }, 0);
-    return .{ .positional = @unionInit(ReturnType, positional.ident, space) };
+    return .{ .positional = @unionInit(ReturnType._PositionalUnion, positional.ident, space) };
 }
 
-fn handleFlag(
-    p: *Parser,
-    comptime ReturnType: type,
-    comptime flag: Flag,
-    parse_context: anytype,
-    long_arg: ?[]const u8,
-    comptime context: Context
-) error{ParseError,OutOfMemory}!ReturnType {
+fn handleFlag(p: *Parser, comptime ReturnType: type, comptime flag: Flag, parse_context: anytype, long_arg: ?[]const u8, comptime context: Context) error{ ParseError, OutOfMemory }!ReturnType {
     try parse_context.foundFlag(p, flag.ident, context.flag.repr.toStringComptime());
+    if (flag.type == void) {
+        if (long_arg) |arg|
+            return p.fail("found unexpected argument '{s}' for flag '{s}'", .{ arg, context.flag.repr.toStringComptime() });
+        return .{ .flag = @unionInit(ReturnType._FlagUnion, flag.ident, {}) };
+    }
     var space: flag.Resolve() = undefined;
-    if (@typeInfo(flag.type) == .optional) {
-        const arg: []const u8 = long_arg orelse (p.tokenizer.optionalArgument() orelse return null);
-        try values.parseValueAuto(flag.Resolve(), &space, p, arg, context, 0);
+    if (@typeInfo(flag.type) == .optional) opt: {
+        const arg: []const u8 = long_arg orelse (p.tokenizer.optionalArgument() orelse {
+            space = null;
+            break :opt;
+        });
+        try values.parseValueAuto(flag.type, &space, p, arg, context, 0);
     } else {
         const arg: []const u8 = long_arg orelse (p.tokenizer.argument() catch |e| switch (e) {
             error.ExpectedArgument, error.LeadingDashInArgument => return p.fail("expected argument for flag '{s}'", .{context.flag.repr.toStringComptime()}),
         });
-        try values.parseValueAuto(flag.Resolve(), &space, p, arg, context, 0);
+        try values.parseValueAuto(flag.type, &space, p, arg, context, 0);
     }
     return .{ .flag = @unionInit(ReturnType._FlagUnion, flag.ident, space) };
 }
@@ -207,9 +208,9 @@ inline fn gatherFlagCandidates(comptime flags: []const Flag) []const []const u8 
     comptime var candidates: [][]const u8 = &.{};
     inline for (flags) |flag| {
         if (flag.long) |long|
-            candidates = candidates ++ .{ "--" ++ long };
+            candidates = candidates ++ .{"--" ++ long};
         if (flag.short) |short|
-            candidates = candidates ++ .{ comptime std.fmt.comptimePrint("-{u}", .{short}) };
+            candidates = candidates ++ .{comptime std.fmt.comptimePrint("-{u}", .{short})};
     }
     // TODO check for duplicates + support aliases
     const as_const = candidates;
@@ -247,7 +248,7 @@ pub inline fn NextArgReturnType(comptime flags: []const Flag, comptime positiona
         } });
         break :blk .{ Enum, Union };
     };
-    
+
     const PositionalEnum, const PositionalUnion = comptime blk: {
         var union_fields: [positionals.len]Type.UnionField = undefined;
         var enum_fields: [positionals.len]Type.EnumField = undefined;
@@ -390,6 +391,7 @@ pub inline fn ParseContext(comptime flags: []const Flag, comptime positionals: [
                         }
                     },
                     positionals.len => {},
+                    else => unreachable,
                 }
             }
         }

@@ -3,7 +3,7 @@ const std = @import("std");
 const Example = enum {
     echo,
     git,
-    @"print-env",
+    env,
     @"math-test",
     random,
     readme,
@@ -27,7 +27,11 @@ pub fn build(b: *std.Build) !void {
         .install_subdir = "doc/argz",
     });
 
-    const argz_module = b.addModule("argz", .{ .root_source_file = b.path("src/argz.zig"), .optimize = optimize, .target = target });
+    const argz_module = b.addModule("argz", .{
+        .root_source_file = b.path("src/argz.zig"),
+        .optimize = optimize,
+        .target = target,
+    });
 
     const example = b.option([]const u8, "example", "the example to run");
 

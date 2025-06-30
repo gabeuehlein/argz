@@ -1,4 +1,3 @@
-
 const std = @import("std");
 const assert = std.debug.assert;
 
@@ -34,9 +33,11 @@ pub fn ResolveType(comptime T: type, context: Parser.Context.Tag) type {
     if (comptime isCustomType(T)) {
         const data = customTypeData(T);
         return data.Resolve(context) orelse @compileError("type '" ++ @typeName(T) ++ "' cannot exist in a struct in a context of '" ++ @tagName(context) ++ "'");
-    }
-    else switch (@typeInfo(T)) {
-        .int, .float, .bool, => return T,
+    } else switch (@typeInfo(T)) {
+        .int,
+        .float,
+        .bool,
+        => return T,
         .array => |info| {
             if (info.len == 0)
                 @compileError("arrays may not have a length of 0");
@@ -51,7 +52,9 @@ pub fn ResolveType(comptime T: type, context: Parser.Context.Tag) type {
                         @compileError("nested optionals are not allowed");
                     continue :state @typeInfo(child_info.child);
                 },
-                .@"enum", .error_set, => {},
+                .@"enum",
+                .error_set,
+                => {},
                 else => @compileError("type '" ++ @typeName(info.child) ++ "' is not allowed as an array's child type"),
             }
             return T;
@@ -62,7 +65,7 @@ pub fn ResolveType(comptime T: type, context: Parser.Context.Tag) type {
         .optional => |info| {
             if (@typeInfo(info.child) == .optional)
                 @compileError("nested optionals are not allowed");
-            return ?ResolveType(info.child, context); 
+            return ?ResolveType(info.child, context);
         },
         .pointer => |info| {
             if (info.size != .slice)
@@ -80,7 +83,7 @@ pub fn ResolveType(comptime T: type, context: Parser.Context.Tag) type {
                     if (!(child_info.is_const and child_info.child == u8))
                         @compileError("slices of u8 (i.e. strings) are the only pointer types allowed as the child element of slices");
                 },
-                else => @compileError("type '" ++ @typeName(info.child) ++ "' is not allowed as a slice's child type")
+                else => @compileError("type '" ++ @typeName(info.child) ++ "' is not allowed as a slice's child type"),
             }
             return T;
         },
@@ -89,13 +92,12 @@ pub fn ResolveType(comptime T: type, context: Parser.Context.Tag) type {
         .void => {
             if (context != .flag)
                 @compileError("type 'void' is only legal in the context of a flag");
-            return bool;
+            return void;
         },
         .@"enum" => return T,
         else => @compileError("type '" ++ @typeName(T) ++ "' is not legal in argz"),
     }
 }
-
 
 pub inline fn requiresAllocator(comptime T: type, comptime context: Parser.Context.Tag) bool {
     if (isCustomType(T)) {
@@ -127,11 +129,10 @@ pub inline fn typeName(comptime T: type, comptime context: Parser.Context.Tag, c
         .int => "integer",
         .float => "number",
         .bool => "true | false",
-        .pointer => |ptr_info| 
-            if (ptr_info.child == u8 and ptr_info.is_const)
-                "string"
-            else 
-                typeName(ptr_info.child, context, depth + 1) ++ "...",
+        .pointer => |ptr_info| if (ptr_info.child == u8 and ptr_info.is_const)
+            "string"
+        else
+            typeName(ptr_info.child, context, depth + 1) ++ "...",
         .array => |array_info| (typeName(array_info.child, context, depth + 1) orelse return null) ++ "[" ++ comptime std.fmt.comptimePrint("{d}", .{array_info.len}) ++ "]",
         .void => null,
         .@"enum" => |info| blk: {
@@ -139,7 +140,7 @@ pub inline fn typeName(comptime T: type, comptime context: Parser.Context.Tag, c
             if (info.fields.len > 5)
                 break :blk @typeName(T);
             comptime var string: [:0]const u8 = info.fields[0].name;
-        inline for (info.fields[1..]) |field| {
+            inline for (info.fields[1..]) |field| {
                 string = string ++ " | " ++ field.name;
             }
             if (depth != 0)
@@ -152,7 +153,6 @@ pub inline fn typeName(comptime T: type, comptime context: Parser.Context.Tag, c
         },
     };
 }
-
 
 pub fn StructFromFlags(comptime flags: []const argz.Flag) type {
     comptime var fields: [flags.len]std.builtin.Type.StructField = undefined;

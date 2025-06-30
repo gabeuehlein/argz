@@ -2,22 +2,18 @@ const std = @import("std");
 const argz = @import("argz");
 const builtin = @import("builtin");
 
-const config: argz.Config = .{
-    .top_level_flags = &.{
-        .help,
-        .init(void, 'E', "stderr", null, "output to standard error instead of standard out", .{}),
-    },
-    .mode = .{
-        .positionals = &.{
-            // Note that sentinel-terminated strings are used here. it isn't
-            // necessary, but it shows that `argz` will append a sentienl to
-            // strings (via dynamic allocation) when requested.
-            .init(argz.types.Multi([:0]const u8, .dynamic), "ARG", "the arguments to print", .{
-                .field_name = "arg",
-            }),
-        },
-    },
-    .support_allocation = true,
+const cli = struct {
+    pub const flags = [_]argz.Flag{
+        .init(void, "help", .{ .short = 'h', .long = "help", .help_msg = "show this help", .required = false }),
+        .init(void, "no_newline", .{ .short = 'n', .help_msg = "separate arguments with a space instead of a newline", .required = false }),
+        .init(void, "stderr", .{ .short = 'E', .help_msg = "separate arguments with a space instead of a newline", .required = false }),
+    };
+
+    pub const positionals = [1]argz.Positional{
+        .init([:0]const u8, "arg", "arg", .{ .repeatable = true, .required = false }),
+    };
+
+    pub const Context = argz.Parser.ParseContext(&flags, &positionals);
 };
 
 var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
@@ -30,23 +26,44 @@ pub fn main() !void {
     defer if (is_debug) {
         _ = debug_allocator.deinit();
     };
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
 
-    const argv = argz.SystemArgs.init();
-    var p = try argz.Parser.init(argv, .{
-        .program_name = "echo",
-        .program_description = "print the provided arguments to stdout",
-        .allocator = arena.allocator(),
+    var args = std.ArrayListUnmanaged([:0]const u8).empty;
+    defer {
+        for (args.items) |arg|
+            gpa.free(arg);
+        args.deinit(gpa);
+    }
+    var emit_to_stderr = false;
+    var no_newline = false;
+
+    var p = try argz.Parser.init(argz.SystemArgs.init(), .{
+        .allocator = gpa,
     });
+    var context: cli.Context = .{};
+    while (try p.nextArg(&cli.flags, &cli.positionals, &context)) |itm| {
+        switch (itm) {
+            .flag => |flag| switch (flag) {
+                .help => @panic("TODO"),
+                .no_newline => no_newline = true,
+                .stderr => emit_to_stderr = true,
+            },
+            .positional => |positional| switch (positional) {
+                .arg => |arg| try args.append(gpa, arg),
+            },
+        }
+    }
+    try context.checkRequirements(&p);
 
-    var opts = try p.parse(config);
-    defer p.deinit(config, &opts);
-    var out = if (opts.flags.stderr)
+    var file = if (emit_to_stderr)
         std.io.getStdErr()
     else
         std.io.getStdOut();
-
-    for (opts.positionals.arg.items) |arg|
-        try out.writer().print("{s}\n", .{arg});
+    const w = file.writer();
+    const char: u8 = if (no_newline) ' ' else '\n';
+    for (args.items, 0..) |arg, i| {
+        try w.print("{s}", .{arg});
+        if (i + 1 != args.items.len)
+            try w.writeByte(char);
+    }
+    try w.writeByte('\n');
 }

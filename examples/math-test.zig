@@ -10,8 +10,19 @@ const Operator = enum {
 
 const cli = struct {
     pub const flags = [_]argz.Flag{
+        .init(?[]const u8, "help", .{
+            .long = "help",
+            .short = 'h',
+            .help_msg = "show this help",
+            .required = false,
+        }),
         .init(i32, "max", .{ .long = "max", .help_msg = "the largest number that a question can have", .required = false }),
         .init(i32, "min", .{ .long = "min", .help_msg = "the smallest number that a question can have", .required = false }),
+        .init(void, "no_show_answer", .{
+            .long = "no-show-answer",
+            .help_msg = "don't show the answer after getting a question wrong",
+            .required = false,
+        }),
         .init(u32, "num_questions", .{
             .short = 'n',
             .long = "num_questions",
@@ -36,14 +47,20 @@ pub fn main() !void {
     var max: i32 = 10;
     var min: i32 = -10;
     var num_questions: u32 = 20;
+    var no_show_answers = false;
     var operators: std.BoundedArray(Operator, std.meta.fields(Operator).len) = .{ .buffer = undefined, .len = 0 };
+
+    var stdout = std.io.getStdOut();
+    const out = stdout.writer();
+    var stdin = std.io.getStdIn();
+    const in = stdin.reader();
 
     var p = try argz.Parser.init(argz.SystemArgs.init(), .{
         .program_name = "math-test",
         .program_description = "example program offering arithmetic quizzes",
     });
     var context = cli.Context{};
-    while (try p.nextArg(&cli.flags, &cli.positionals, &context)) |arg| {
+    while (p.nextArg(&cli.flags, &cli.positionals, &context) catch std.process.exit(1)) |arg| {
         switch (arg) {
             .flag => |flag| switch (flag) {
                 .max => |m| max = m,
@@ -53,6 +70,15 @@ pub fn main() !void {
                     if (std.mem.indexOfScalar(Operator, operators.constSlice(), o) != null)
                         p.fatal("cannot add operator '{s}' multiple times", .{@tagName(o)});
                     operators.appendAssumeCapacity(o);
+                },
+                .no_show_answer => no_show_answers = true,
+                .help => |maybe_topic| {
+                    if (maybe_topic) |topic| {
+                        try out.print("This is a help message for topic '{s}': <nothing>\n", .{topic});
+                    } else {
+                        try out.writeAll("TODO: assisted helpstring generation\n");
+                    }
+                    std.process.exit(0);
                 },
             },
             .positional => unreachable,
@@ -64,12 +90,7 @@ pub fn main() !void {
         operators = @TypeOf(operators).fromSlice(&.{ .add, .sub, .mul, .div }) catch unreachable;
 
     if (min > max)
-        p.fatal("minimum value ({d}) must be greater than maximum value ({d})", .{ min, max });
-
-    var stdout = std.io.getStdOut();
-    const out = stdout.writer();
-    var stdin = std.io.getStdIn();
-    const in = stdin.reader();
+        p.fatal("minimum value ({d}) must be less than or equal to maximum value ({d})", .{ min, max });
 
     var xrng = std.Random.DefaultPrng.init(@bitCast(std.time.microTimestamp()));
     const rng = xrng.random();
@@ -91,6 +112,8 @@ pub fn main() !void {
         if (b == 0 and op == .div) {
             if (std.ascii.eqlIgnoreCase(answer, "undefined"))
                 try out.writeAll("Correct!\n")
+            else if (no_show_answers)
+                try out.writeAll("Incorrect.\n")
             else
                 try out.writeAll("Incorrect. Correct answer: undefined\n");
         } else {
@@ -101,11 +124,17 @@ pub fn main() !void {
                 .div => @divTrunc(a, b),
             };
             const answer_int = std.fmt.parseInt(i32, answer, 10) catch {
-                try out.print("Incorrect. Correct answer: {d}\n", .{correct_answer});
+                if (no_show_answers)
+                    try out.writeAll("Incorrect.\n")
+                else
+                    try out.print("Incorrect. Correct answer: {d}\n", .{correct_answer});
                 continue;
             };
             if (answer_int != correct_answer) {
-                try out.print("Incorrect. Correct answer: {d}\n", .{correct_answer});
+                if (no_show_answers)
+                    try out.writeAll("Incorrect.\n")
+                else
+                    try out.print("Incorrect. Correct answer: {d}\n", .{correct_answer});
             } else {
                 try out.writeAll("Correct!\n");
             }

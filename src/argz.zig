@@ -8,10 +8,9 @@ pub const Args = args.Args;
 pub const OwnedArgs = args.OwnedArgs;
 pub const SystemArgs = args.SystemArgs;
 pub const Parser = @import("Parser.zig").Parser;
-pub const Lexer = @import("Lexer.zig");
+pub const Tokenizer = @import("Tokenizer.zig");
 pub const fmt = @import("format.zig");
 pub const types = @import("types.zig");
-
 
 pub const Flag = struct {
     /// The short form of the flag. If equal to `null`, `long` must have a valid representation.
@@ -59,11 +58,6 @@ pub const Flag = struct {
         return types.ResolveType(flag.type, .flag);
     }
 
-    pub const help: Flag = .init(FlagHelp, 'h', "help", null, "display this help", .{ .info = 
-        \\ The '--help' flag displays help regarding program usage.
-        \\ An occurance of the '--help' flag will exit the program.
-    });
-
     pub const Options = struct {
         short: ?u21 = null,
         long: ?[:0]const u8 = null,
@@ -72,19 +66,6 @@ pub const Flag = struct {
         alt_type_name: ?[:0]const u8 = null,
         repeatable: bool = false,
         required: bool = true,
-    };
-
-    /// TODO re-implement aliases
-    pub const Identifier = union(enum) {
-        long: [:0]const u8,
-        short: u21,
-
-        pub inline fn flagString(comptime ident: Identifier) []const u8 {
-            return switch (ident) {
-                .long => |text| "--" ++ text,
-                .short => |char| "-" ++ std.unicode.utf8EncodeComptime(char),
-            };
-        }
     };
 };
 
@@ -95,7 +76,6 @@ pub const Positional = struct {
     /// a force-stop sequence (`"--"`). The actual type of the positional will be [TrailingPositionals], which will reference
     /// the strings in the arguments passed to the parser.
     type: type,
-    default_value_ptr: ?*const anyopaque,
     /// The string that will be displayed in parentheses or braces in the CLI's help message. This should
     /// be brief yet descriptive, such as `"PATH"` or `"ITERATIONS"`.
     display: [:0]const u8,
@@ -107,18 +87,23 @@ pub const Positional = struct {
 
     pub const Options = struct {
         help_msg: ?[:0]const u8 = null,
+        required: bool = true,
+        repeatable: bool = false,
     };
 
-    pub inline fn init(comptime T: type, default_value: ?types.StructField(T, .positional), id: [:0]const u8, display: [:0]const u8, options: Options) Positional {
+    pub inline fn init(comptime T: type, id: [:0]const u8, display: [:0]const u8, options: Options) Positional {
         return .{
             .type = T,
-            .default_value_ptr = if (default_value) |dv| @ptrCast(&@as(@typeInfo(@TypeOf(default_value)).optional.child, dv)) else null,
             .display = display,
             .help_msg = options.help_msg,
             .ident = id,
             .required = options.required,
             .repeatable = options.repeatable,
         };
+    }
+
+    pub inline fn Resolve(comptime positional: Positional) type {
+        return types.ResolveType(positional.type, .positional);
     }
 
     pub inline fn fieldName(comptime pos: Positional) [:0]const u8 {
@@ -139,12 +124,7 @@ pub const Positional = struct {
 };
 
 pub const Pair = @import("types/pair.zig").Pair;
-pub const Counter = @import("types/counter.zig").Counter;
 pub const Sequence = @import("types/sequence.zig").Sequence;
-pub const Multi = @import("types/multi.zig").Multi;
-pub const MultiStorage = @import("types/multi.zig").Storage;
-pub const TrailingPositionals = @import("types/TrailingPositionals.zig");
-pub const FlagHelp = struct {};
 
 comptime {
     std.testing.refAllDecls(@This());

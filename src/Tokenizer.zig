@@ -4,7 +4,7 @@ argi: usize = 1,
 /// at least part of an argument to be parsed (i.e. `argi < args.len`).
 subargi: usize = 0,
 
-pub fn init(args: Args) error{NoArgs,InvalidUtf8}!Tokenizer {
+pub fn init(args: Args) error{ NoArgs, InvalidUtf8 }!Tokenizer {
     if (args.len == 0)
         return error.NoArgs;
 
@@ -25,7 +25,7 @@ pub fn next(tokenizer: *Tokenizer) ?Token {
             break :blk;
         }
 
-        defer _ = tokenizer.advance(.char); 
+        defer _ = tokenizer.advance(.char);
         const char: u21 = switch (unicode.utf8ByteSequenceLength(arg[tokenizer.subargi]) catch unreachable) {
             1 => arg[tokenizer.subargi],
             2 => unicode.utf8Decode2(arg[tokenizer.subargi..][0..2].*) catch unreachable,
@@ -36,7 +36,10 @@ pub fn next(tokenizer: *Tokenizer) ?Token {
         return .{ .short_flag = char };
     }
     switch (arg.len) {
-        0, 1 => return .{ .word = arg },
+        0, 1 => {
+            _ = tokenizer.advance(.full);
+            return .{ .word = arg };
+        },
         2 => if (std.mem.eql(u8, arg, "--"))
             return .stop,
         else => {},
@@ -45,9 +48,9 @@ pub fn next(tokenizer: *Tokenizer) ?Token {
         if (arg[1] == '-') {
             defer _ = tokenizer.advance(.full);
             const long = arg[2..];
-            const repr: []const u8, const flag_arg: ?[]const u8 = if (std.mem.indexOfScalar(u8, arg, '=')) |eq_index|
-                .{ long[0..eq_index], long[eq_index..] } 
-            else 
+            const repr: []const u8, const flag_arg: ?[]const u8 = if (std.mem.indexOfScalar(u8, long, '=')) |eq_index|
+                .{ long[0..eq_index], long[eq_index + 1 ..] }
+            else
                 .{ long, null };
 
             return .{ .long_flag = .{
@@ -71,7 +74,7 @@ pub fn next(tokenizer: *Tokenizer) ?Token {
     }
 }
 
-pub fn argument(tokenizer: *Tokenizer) error{ExpectedArgument,LeadingDashInArgument}![]const u8 {
+pub fn argument(tokenizer: *Tokenizer) error{ ExpectedArgument, LeadingDashInArgument }![]const u8 {
     defer _ = tokenizer.advance(.full);
     if (tokenizer.subargi != 0) {
         if (tokenizer.subargi == tokenizer.currentArg().?.len)
@@ -82,7 +85,7 @@ pub fn argument(tokenizer: *Tokenizer) error{ExpectedArgument,LeadingDashInArgum
 
         return arg;
     } else {
-        const arg = tokenizer.currentArg() orelse return error.ExpectedArgument; 
+        const arg = tokenizer.currentArg() orelse return error.ExpectedArgument;
         if (arg[0] == '-') {
             return error.LeadingDashInArgument;
         } else {
@@ -98,7 +101,9 @@ pub fn optionalArgument(tokenizer: *Tokenizer) ?[]const u8 {
             return null;
         if (arg[tokenizer.subargi] == '=') {
             defer _ = tokenizer.advance(.full);
-            return arg[tokenizer.subargi + 1..];
+            return arg[tokenizer.subargi + 1 ..];
+        } else {
+            return null;
         }
     } else {
         return null;
@@ -118,9 +123,9 @@ fn currentArg(tokenizer: *const Tokenizer) ?[]const u8 {
 }
 
 fn advance(tokenizer: *Tokenizer, comptime by: enum { char, full }) bool {
-    const arg = tokenizer.currentArg() orelse return false;
     state: switch (by) {
         .char => {
+            const arg = tokenizer.currentArg() orelse return false;
             if (tokenizer.subargi == arg.len) {
                 continue :state .full;
             } else {
@@ -130,9 +135,11 @@ fn advance(tokenizer: *Tokenizer, comptime by: enum { char, full }) bool {
         },
         .full => {
             tokenizer.subargi = 0;
-            if (tokenizer.argi != tokenizer.args.len)
+            if (tokenizer.argi != tokenizer.args.len) {
                 tokenizer.argi += 1;
-            return tokenizer.argi != tokenizer.args.len;
+                return true;
+            }
+            return false;
         },
     }
 }
@@ -164,7 +171,7 @@ test Tokenizer {
     };
     const expected_tokens = [_][]const Token{
         &.{ .{ .long_flag = .{ .repr = "foo", .arg = null } }, .{ .word = "bar" } },
-        &.{ 
+        &.{
             .{ .long_flag = .{ .repr = "foo", .arg = null } },
             .{ .word = "bar" },
             .{ .short_flag = 'a' },

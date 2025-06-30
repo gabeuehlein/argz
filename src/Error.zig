@@ -22,12 +22,12 @@ pub fn init(comptime format: []const u8, args: anytype) Error {
 
 pub fn setFormat(err: *Error, comptime format: []const u8, args: anytype) void {
     const e = std.fmt.bufPrintZ(&err.buf, format, args) catch {
-        const bytes_to_copy = 
-        if (err.buf.len > truncated_msg.len)
-            truncated_msg.len - 1
-        else 
-            err.buf.len - 1;
-        @memcpy(err.buf[err.buf.len -| truncated_msg.len ..], truncated_msg[0..bytes_to_copy + 1]);
+        const bytes_to_copy =
+            if (err.buf.len > truncated_msg.len)
+                truncated_msg.len - 1
+            else
+                err.buf.len - 1;
+        @memcpy(err.buf[err.buf.len -| truncated_msg.len..], truncated_msg[0 .. bytes_to_copy + 1]);
         err.buf[err.buf.len - 1] = 0;
         err.bytes_used = err.buf.len;
         err.num_notes = 0;
@@ -44,12 +44,12 @@ pub fn addNote(err: *Error, comptime format: []const u8, args: anytype) void {
         return;
 
     const note = std.fmt.bufPrintZ(remaining, format, args) catch {
-        const bytes_to_copy = 
-        if (remaining.len > truncated_msg.len)
-            truncated_msg.len
-        else 
-            remaining.len - 1;
-        @memcpy(remaining[remaining.len - bytes_to_copy - 1..][0..bytes_to_copy], truncated_msg[0..bytes_to_copy]);
+        const bytes_to_copy =
+            if (remaining.len > truncated_msg.len)
+                truncated_msg.len
+            else
+                remaining.len - 1;
+        @memcpy(remaining[remaining.len - bytes_to_copy - 1 ..][0..bytes_to_copy], truncated_msg[0..bytes_to_copy]);
         remaining[remaining.len - 1] = 0;
         err.bytes_used = err.buf.len;
         err.num_notes += 1;
@@ -77,7 +77,7 @@ pub fn emit(err: *const Error, writer: anytype, color_conf: TtyConfig) void {
         const index = std.mem.indexOfScalar(u8, remaining, 0).?;
         writer.writeAll(remaining[0..index]) catch return;
         writer.writeByte('\n') catch return;
-        remaining = remaining[index + 1..];
+        remaining = remaining[index + 1 ..];
     }
     for (0..err.num_notes) |_| {
         color_conf.setColor(writer, .blue) catch return;
@@ -88,14 +88,14 @@ pub fn emit(err: *const Error, writer: anytype, color_conf: TtyConfig) void {
         const index = std.mem.indexOfScalar(u8, remaining, 0).?;
         writer.writeAll(remaining[0..index]) catch return;
         writer.writeByte('\n') catch return;
-        remaining = remaining[index + 1..];
+        remaining = remaining[index + 1 ..];
     }
 }
 
 pub fn main() !void {
     var e = Error.init("this is an error", .{});
     e.addNote("this is a note", .{});
-    e.addNote("this is a note with a format argument: {d}", .{ 50 });
+    e.addNote("this is a note with a format argument: {d}", .{50});
     e.addNote("this is an excessively long error note, that will truncate after a bit; " ++ ("A" ** 500), .{});
     e.emit(std.io.getStdErr().writer(), .escape_codes);
 }
