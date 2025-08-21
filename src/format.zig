@@ -2,6 +2,8 @@ const argz = @import("argz.zig");
 const builtin = @import("builtin");
 const std = @import("std");
 const types = @import("types.zig");
+const Writer = std.io.Writer;
+const Reader = std.io.Reader;
 
 const Parser = @import("Parser.zig");
 
@@ -15,15 +17,21 @@ const Mode = argz.Mode;
 
 pub const AllFlagsFormatFn = fn (
     std.io.tty.Config,
-    comptime []const Flag, anytype) anyerror!void;
+    comptime []const Flag,
+    *Writer,
+) anyerror!void;
 
-pub const AllCommandsFormatFn = fn (std.io.tty.Config, comptime []const Command, anytype) anyerror!void;
+pub const AllCommandsFormatFn = fn (
+    std.io.tty.Config,
+    comptime []const Command,
+    *Writer,
+) anyerror!void;
 
 pub const ErrorFormatFn = fn(
     config: std.io.tty.Config,
     err: Parser.Error,
     parser: *Parser,
-    writer: std.io.AnyWriter
+    writer: *Writer,
 ) anyerror!void;
 
 pub const PrologueFormatFn = fn (
@@ -34,13 +42,13 @@ pub const PrologueFormatFn = fn (
     comptime current_flags: []const Flag,
     program_name: []const u8,
     description: ?[]const u8,
-    writer: std.io.AnyWriter,
+    writer: *Writer,
 ) anyerror!void;
 
 pub const CommandFormatFn = fn (
     config: std.io.tty.Config,
     comptime cmd: Command,
-    writer: std.io.AnyWriter,
+    writer: *Writer,
     /// Extra data
     extra: anytype,
 ) anyerror!void;
@@ -49,7 +57,7 @@ pub const FlagFormatFn = fn (
     config: std.io.tty.Config,
     comptime Flag,
     bool,
-    anytype,
+    *Writer,
     /// Extra data
     anytype,
 ) anyerror!void;
@@ -57,7 +65,7 @@ pub const FlagFormatFn = fn (
 pub fn formatAllFlagsDefault(
     config: std.io.tty.Config,
     comptime flags: []const Flag,
-    writer: std.io.AnyWriter,
+    writer: *Writer,
 ) @TypeOf(writer).Error!void {
     if (flags.len == 0) return;
     try config.setColor(writer, .green);
@@ -186,7 +194,7 @@ fn formatValue(value: anytype, writer: std.io.AnyWriter) !void {
 pub fn formatAllCommandsDefault(
     config: std.io.tty.Config,
     comptime commands: []const Command,
-    writer: std.io.AnyWriter,
+    writer: *Writer,
 ) @TypeOf(writer).Error!void {
     try config.setColor(writer, .green);
     try config.setColor(writer, .bold);
@@ -225,7 +233,7 @@ pub fn formatAllCommandsDefault(
 pub fn formatCommandDefault(
     config: std.io.tty.Config,
     comptime cmd: Command,
-    writer: std.io.AnyWriter,
+    writer: *Writer,
     /// Extra data
     extra: anytype,
 ) @TypeOf(writer).Error!void {
@@ -249,7 +257,7 @@ pub fn formatPrologueDefault(
     comptime current_flags: []const Flag,
     program_name: []const u8,
     description: ?[]const u8,
-    writer: std.io.AnyWriter,
+    writer: *Writer,
 ) @TypeOf(writer).Error!void {
     if (cmd_stack.len == 0) {
         if (description) |desc| {
@@ -327,7 +335,12 @@ pub fn formatPrologueDefault(
     try writer.writeByte('\n');
 }
 
-pub fn formatErrorDefault(config: std.io.tty.Config, err: Parser.Error, parser: *Parser, writer: std.io.AnyWriter) anyerror!void {
+pub fn formatErrorDefault(
+    config: std.io.tty.Config,
+    err: Parser.Error,
+    parser: *Parser,
+    writer: *Writer,
+) anyerror!void {
     switch (err) {
         .expected_arg_for_flag => |data| {
             try emitErr(writer, config, "expected an argument for flag '{s}'", .{data.flag_string});

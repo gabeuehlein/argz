@@ -21,6 +21,10 @@ const Type = std.builtin.Type;
 
 pub const Parser = @This();
 
+pub const VTable = struct {
+    
+};
+
 pub const Options = struct {
     /// Whether to emit ANSI escape sequences to enable support for colored output.
     color_mode: ColorMode = .detect,

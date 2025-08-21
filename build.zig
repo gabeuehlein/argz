@@ -14,20 +14,11 @@ pub fn build(b: *std.Build) !void {
 
     const optimize = b.standardOptimizeOption(.{});
 
-    const lib = b.addStaticLibrary(.{
-        .name = "argz",
+    const mod = b.addModule("argz", .{
         .root_source_file = b.path("src/argz.zig"),
         .target = target,
         .optimize = optimize,
     });
-
-    const install_docs = b.addInstallDirectory(.{
-        .source_dir = lib.getEmittedDocs(),
-        .install_dir = .prefix,
-        .install_subdir = "doc/argz",
-    });
-
-    const argz_module = b.addModule("argz", .{ .root_source_file = b.path("src/argz.zig"), .optimize = optimize, .target = target });
 
     const example = b.option([]const u8, "example", "the example to run");
 
@@ -35,24 +26,27 @@ pub fn build(b: *std.Build) !void {
     if (example) |example_str| {
         const e = std.meta.stringToEnum(Example, example_str) orelse @panic("invalid example provided");
         const exe = switch (e) {
-            inline else => |ex| b.addExecutable(.{
-                .name = @tagName(ex) ++ "-demo",
-                .root_source_file = b.path("examples/" ++ @tagName(ex) ++ ".zig"),
-                .target = target,
-                .optimize = optimize,
-            }),
+            inline else => |ex| blk: {
+                const example_mod = b.createModule(.{
+                    .root_source_file = b.path("examples/" ++ @tagName(ex) ++ ".zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{ .{ .name = "argz", .module = mod } },
+                });
+                break :blk b.addExecutable(.{
+                    .name = @tagName(ex) ++ "-demo",
+                    .root_module = example_mod,
+                });
+            },
         };
-        exe.root_module.addImport("argz", argz_module);
         const artifact = b.addRunArtifact(exe);
-        if (b.args) |args| {
+        if (b.args) |args|
             artifact.addArgs(args);
-        }
         run_example.dependOn(&artifact.step);
     }
 
     const test_step = b.step("test", "run tests");
-    createTests(b, test_step, target, optimize, argz_module) catch |e| std.debug.panic("running tests failed: {s}", .{@errorName(e)});
-    b.getInstallStep().dependOn(&install_docs.step);
+    createTests(b, test_step, target, optimize, mod) catch |e| std.debug.panic("running tests failed: {s}", .{@errorName(e)});
 }
 
 fn createTests(b: *std.Build, step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, argz_module: *std.Build.Module) !void {
@@ -75,13 +69,15 @@ fn buildTest(b: *std.Build, step: *std.Build.Step, target: std.Build.ResolvedTar
     defer arena_allocator.deinit();
     var f = try std.fs.cwd().openFile(file.getPath(b), .{});
     defer f.close();
-    var f_reader = f.reader();
+    var buf: [4096]u8 = undefined;
+    var f_reader = f.reader(&buf);
     var line_buf: std.ArrayList(u8) = .init(gpa);
     defer line_buf.deinit();
     var stdout_expected_string: std.ArrayList(u8) = .init(gpa);
     defer stdout_expected_string.deinit();
     var stderr_expected_string: std.ArrayList(u8) = .init(gpa);
     defer stderr_expected_string.deinit();
+    var expected_exit_code: u8= 0;
 
     const test_exe = b.addExecutable(.{
         .name = std.fs.path.basename(file.getDisplayName()),
@@ -106,9 +102,12 @@ fn buildTest(b: *std.Build, step: *std.Build.Step, target: std.Build.ResolvedTar
         } else if (std.mem.startsWith(u8, line, "// expected(stderr):")) {
             const rest = line["// expected(stderr):".len..];
             try tokenizeExpectedString(rest, file, &stderr_expected_string);
+        } else if (std.mem.startsWith(u8, line, "// expect-exit-code:")) {
+            const rest = line["// expect-exit-code:".len..];
+            expected_exit_code = try std.fmt.parseInt(u8, std.mem.trim(u8, rest, &std.ascii.whitespace), 0);
         } else break;
     }
-    exe.expectExitCode(0);
+    exe.expectExitCode(expected_exit_code);
     step.dependOn(&exe.step);
     // While it would be nice to test color output, I don't feel like
     // hand-writing all of the ANSI escape sequences.

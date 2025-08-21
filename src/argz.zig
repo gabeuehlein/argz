@@ -3,6 +3,8 @@ const builtin = @import("builtin");
 const args = @import("args.zig");
 
 const Type = std.builtin.Type;
+const Writer = std.Io.Writer;
+const Reader = std.Io.Reader;
 
 pub const Args = args.Args;
 pub const OwnedArgs = args.OwnedArgs;
@@ -198,7 +200,6 @@ pub const Flag = struct {
     // A list of potential aliases for this flag. No alias may be the same as another alias or the flag's
     // primary long or short form.
     aliases: []const Identifier,
-    dependencies: []const Dependency,
 
     pub inline fn init(comptime T: type, short: ?u21, long: ?[:0]const u8, default_value: ?types.StructField(T, .flag), help_msg: ?[]const u8, extra: Extra) Flag {
         return comptime .{
@@ -241,6 +242,25 @@ pub const Flag = struct {
         return types.StructField(flag.type, .flag);
     }
 
+    pub fn toRuntime(comptime flag: Flag) Runtime {
+        return .{
+            .short = flag.short,
+            .long = flag.long,
+            .type_name = fmt.typeString(flag.type, .flag),
+            .default_value_repr = if (flag.defaultValue()) |dv| blk: {
+                if (@hasDecl(flag.type, "format"))
+                    if (@FieldType(flag.type, "format"))
+                        break :blk comptime std.fmt.comptimePrint("{f}", .{dv});
+                break :blk null;
+            } else null,
+            .help_msg = flag.help_msg,
+            .info = flag.info,
+            .field_name = flag.field_name,
+            .alt_type_name = flag.alt_type_name,
+            .aliases = flag.aliases,
+        };
+    }
+
     pub const help: Flag = .init(types.FlagHelp, 'h', "help", null, "display this help", .{ .info = 
         \\ The '--help' flag displays help regarding program usage.
         \\ An occurance of the '--help' flag will exit the program.
@@ -251,7 +271,6 @@ pub const Flag = struct {
         field_name: ?[:0]const u8 = null,
         alt_type_name: ?[:0]const u8 = null,
         aliases: []const Identifier = &.{},
-        dependencies: []const Dependency = &.{},
     };
 
     pub const Identifier = union(enum) {
@@ -266,29 +285,28 @@ pub const Flag = struct {
         }
     };
 
-    pub const Dependency = struct {
-        flag: Identifier,
-        pred: Predicate,
-        pub const Predicate = union(enum) {
-            /// Indicates that the flag containing this `Dependency` cannot be found alongside `flag`
-            /// in a sequence of command line arguments.
-            exclusive,
-            /// Indicates that the flag containing this `Dependency` must be found alongside `flag`
-            /// in a sequence of command line arguments.
-            required_present,
-            /// Indicates that an occurance of the flag containing this `Dependency` in a sequence of
-            /// command line arguments implies `flag[=value]`. If `override` is `true`, this will override
-            /// a previous occurance of `flag`.
-            implies: struct {
-                value: *const anyopaque,
-                override: bool = false,
-            },
-            requires: union(enum) {
-                @"and": []const Predicate,
-                @"or": []const Predicate,
-                eq: ?*const anyopaque,
-            },
-        };
+    pub const Runtime = struct {
+        /// The short form of the flag. If equal to `null`, `long` must have a valid representation.
+        short: ?u21,
+        /// The long form of the flag. If equal to `null`, `short` must have a valid representation.
+        long: ?[:0]const u8,
+        /// The type of the flag. If equal to `void`, then the corresponding `struct` field will be a
+        /// boolean indicating whether this flag was found in the argument list.
+        type_name: [:0]const u8,
+        default_value_repr: ?[:0]const u8,
+        /// A brief description of the flag's purpose and usage.
+        help_msg: ?[]const u8,
+        /// A detailed string documenting the flag's purpose. For use within instances of a `--help=flag:<flag>` flag;
+        info: ?[]const u8,
+        /// The name of the field representing the flag in the resulting flag `struct`. If `null`, the
+        /// field name will be equal to the flag's long form, or the short form if no long form was provided.
+        field_name: ?[:0]const u8,
+        /// An alternative type name to display in place of a flag's type. For example, one might specify
+        /// this to be `"PATH"` if a string argument should represent a filesystem path.
+        alt_type_name: ?[:0]const u8,
+        // A list of potential aliases for this flag. No alias may be the same as another alias or the flag's
+        // primary long or short form.
+        aliases: []const Identifier,
     };
 };
 
