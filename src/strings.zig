@@ -7,34 +7,6 @@ const assert = std.debug.assert;
 const builtin = @import("builtin");
 const options = @import("options");
 
-pub const Audience = enum {
-    /// Produces strings tailored to users. For instance, passing a `u32`
-    /// argument to [typeName] will return `"integer"`.
-    user,
-    /// Produces strings tailored to developers of software using `argz`.
-    /// For instance, [typeName] will use `@typeName` to produce a precise type name
-    /// to more accurately convey the source type provided to it. "Fancy" formatting
-    /// like whitespace padding is still generated where applicable to aid with readability.
-    developer,
-    /// Performs no work prettifying strings. This is similar to the `.developer`
-    /// audience, but with less fancy things. For instance, padding will not be added in certain areas
-    /// where it would help humans reading the strings; only one space will be emitted to separate them
-    /// regardless of other settings.
-    computer,
-
-
-    pub const default: Audience = if (options.audience_override) |audience|
-        audience
-    else switch (builtin.mode) {
-        .Debug => .developer,
-        .ReleaseFast, .ReleaseSafe => .user,
-        .ReleaseSmall => .computer,
-    };
-};
-
-/// Internal function to check that `T` is valid in a particular context
-fn validateType(comptime T: type) void {
-}
 
 /// Returns an appropriate representation of the name of `T` pertaining to the target
 /// `audience`. For instance, `typeName([2]u32, .user)` will return `"integer,integer"`,

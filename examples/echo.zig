@@ -3,7 +3,7 @@ const argz = @import("argz");
 const builtin = @import("builtin");
 
 const config: argz.Config = .{
-    .top_level_flags = &.{
+    .top_level_options = &.{
         .help,
         .init(void, 'E', "stderr", null, "output to standard error instead of standard out", .{}),
     },
@@ -42,7 +42,7 @@ pub fn main() !void {
 
     var opts = try p.parse(config);
     defer p.deinit(config, &opts);
-    var out = if (opts.flags.stderr)
+    var out = if (opts.options.stderr)
         std.io.getStdErr()
     else
         std.io.getStdOut();

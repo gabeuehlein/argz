@@ -12,7 +12,7 @@ const argz = @import("argz");
 const builtin = @import("builtin");
 
 const config: argz.Config = .{
-    .top_level_flags = &.{
+    .top_level_options = &.{
         .help,
         .init(void, 'E', "stderr", null, "output to standard error instead of standard out", .{}),
     },
@@ -29,6 +29,7 @@ const config: argz.Config = .{
 var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 
 pub fn main() !void {
+    if(true) return;
     const gpa, const is_debug = switch (builtin.mode) {
         .Debug, .ReleaseSafe => .{ debug_allocator.allocator(), true },
         .ReleaseFast, .ReleaseSmall => .{ std.heap.smp_allocator, false },
@@ -45,7 +46,7 @@ pub fn main() !void {
 
     var opts = try p.parse(config);
     defer p.deinit(config, &opts);
-    var out = if (opts.flags.stderr)
+    var out = if (opts.options.stderr)
         std.io.getStdErr()
     else
         std.io.getStdOut();

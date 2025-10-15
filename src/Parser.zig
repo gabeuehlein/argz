@@ -1,174 +1,347 @@
 const std = @import("std");
+const mem = std.mem;
 const argz = @import("argz.zig");
 const Lexer = @import("Lexer.zig");
 const builtin = @import("builtin");
-const values = @import("Parser/values.zig");
+const values = @import("values.zig");
 
 const assert = std.debug.assert;
 
-const Flag = argz.Flag;
-const Command = argz.Command;
-const Mode = argz.Mode;
-const Config = argz.Config;
+const Option = argz.Option;
+const Positional = argz.Positional;
 const Allocator = std.mem.Allocator;
 const Args = @import("args.zig").Args;
 const format = @import("format.zig");
 const types=  @import("types.zig");
-
-const TtyConfig = std.io.tty.Config;
+const Writer = std.Io.Writer;
 
 const Type = std.builtin.Type;
-
 pub const Parser = @This();
 
-pub const VTable = struct {
-    
+interface: Interface,
+color_mode: argz.ColorMode = .detect,
+allocator: ?Allocator = null,
+stdout_config: std.Io.tty.Config,
+stderr_config: std.Io.tty.Config,
+program_name: ?[]const u8,
+program_description: ?[]const u8,
+
+
+pub const Interface = struct {
+    vtable: *const VTable,
+    context: *anyopaque,
+
+    pub fn next(iface: *Interface) ?Token {
+        return iface.vtable.next(iface.context);
+    }
+
+    pub fn argument(iface: *Interface, allow_leading_dash: bool) ?[]const u8 {
+        return iface.vtable.argument(iface.context, allow_leading_dash);
+    }
+
+    pub fn formatHelp(
+        iface: *Interface,
+        options: []const Option.Runtime,
+        positionals: []const Positional.Runtime,
+        writer: *Writer
+    ) Writer.Error!void {
+        return iface.vtable.format_help(iface.context, options, positionals, writer);
+    }
+
+    pub fn handleError(iface: *Interface, parser: *Parser, err: Error) anyerror!void {
+        return iface.vtable.handle_error(iface, parser, err);
+    }
+
+    pub const VTable = struct {
+        next: *const fn(context: *anyopaque) ?Token,
+
+        argument: *const fn(context: *anyopaque, allow_leading_dash: bool) ?[]const u8,
+
+        format_help: *const fn(
+            context: *anyopaque,
+            options: []const Option.Runtime,
+            positionals: []const Positional.Runtime,
+            writer: *Writer,
+        ) Writer.Error!void,
+
+        handle_error: *const fn(
+            context: *anyopaque,
+            parser: *Parser,
+            err: Error,
+        ) anyerror!void,
+    };
+
+    pub const Default = @import("Parser/Default.zig");
+};
+
+pub const Token = union(Tag) {
+    long_option: LongOpt,
+    short_option: ShortOpt,
+    /// Also may include '--', which is typically treated as `.force_stop`,
+    word: []const u8,
+    force_stop,
+    err: TokenizeError,
+
+    pub const Option = union(enum) {
+        long: LongOpt,
+        short: ShortOpt,
+
+        pub fn attachedArg(opt: Token.Option) ?[]const u8 {
+            return switch (opt) {
+                inline else => |v| v.attached_arg,
+            };
+        }
+
+        pub fn getArg(opt: Token.Option, p: *Parser, accept_leading_dash: bool) ?[]const u8 {
+            return switch (opt) {
+                inline else => |v| v.getArg(p, accept_leading_dash)
+            };
+        }
+    };
+
+    pub const LongOpt = struct {
+        repr: []const u8,
+        attached_arg: ?[]const u8,
+
+        pub fn getArg(opt: LongOpt, p: *Parser, accept_leading_dash: bool) ?[]const u8 {
+            return opt.attached_arg orelse p.interface.argument(accept_leading_dash);
+        }
+    };
+
+    pub const ShortOpt = struct {
+        repr: u21,
+        attached_arg: ?[]const u8,
+
+        pub fn getArg(opt: ShortOpt, p: *Parser, accept_leading_dash: bool) ?[]const u8 {
+            return opt.attached_arg orelse p.interface.argument(accept_leading_dash);
+        }
+    };
+
+    pub const ErrorTag = enum {
+        unexpected_force_stop,
+        empty_argument,
+    };
+
+    pub const TokenizeError = union(ErrorTag) {
+        unexpected_force_stop,
+        empty_argument: usize,
+
+        const Tag = enum {
+            unexpected_force_stop,
+            empty_argument,
+        };
+    };
+
+    pub const Tag = enum {
+        long_option,
+        short_option,
+        word,
+        force_stop,
+        err,
+    };
 };
 
 pub const Options = struct {
     /// Whether to emit ANSI escape sequences to enable support for colored output.
-    color_mode: ColorMode = .detect,
+    color_mode: argz.ColorMode = .detect,
     /// The name of the program that will be shown in descriptive help strings.
     program_name: ?[]const u8 = null,
     /// A brief description of how the program should be used.
     program_description: ?[]const u8 = null,
     allocator: ?Allocator = null,
-    /// Gives a hint to error handlers that they should attempt to
-    /// make suggestions to users to correct invalid inputs.
-    make_suggestions: bool = true,
 };
 
-pub const Formatters = struct {
-    flags: *const format.AllFlagsFormatFn = format.formatAllFlagsDefault,
-    commands: *const format.AllCommandsFormatFn = format.formatAllCommandsDefault,
-    prologue: *const format.PrologueFormatFn = format.formatPrologueDefault,
-    errors: *const format.ErrorFormatFn = format.formatErrorDefault,
+pub const Context = union(Tag) {
+    option: *const Option.Runtime,
+    positional: *const Positional.Runtime,
+
+    const Tag = enum {
+        option,
+        positional,
+    };
 };
 
-pub const formatters: Formatters = blk: {
-    var result: Formatters = .{};
-    _ = &result;
-    break :blk result;
-};
-
-pub const Context = union(enum) {
-    pub const Tag = std.meta.Tag(@This());
-
-    flag: struct {
-        flag_string: []const u8,
-        flag_ty_string: ?[:0]const u8,
-    },
-    positional: struct {
-        positional_display: []const u8,
-        positional_ty_string: ?[:0]const u8,
-    },
-};
-
-/// Describes the state of the environment in which the parser is currently at.
-/// This type should always be able to be resolved at `comptime` - failure to do
-/// so is a bug and should be reported as such.
-pub const Environment = struct {
-    context: Context,
-    flags: []const Flag,
-    command_stack: []const Command,
-    current_mode: Mode,
-    top_level_config: Config,
-};
-
-pub const ColorMode = enum(u2) {
-    /// Don't emit color even if stdout/stderr support them. 
-    disable,
-    /// Enable colored output if stdout/stderr support them.
-    detect,
-    /// Force the use of color in terminal output, regardless of whether stdout/stderr
-    /// support them. Note that using this is discouraged; if you don't want `argz`
-    /// to check for ANSI escape sequence support, prefer `disable` instead.
-    force,
-};
-
-stdout_config: std.io.tty.Config,
-stderr_config: std.io.tty.Config,
-program_name: ?[]const u8,
-program_description: ?[]const u8,
-make_suggestions: bool = true,
-allocator: ?Allocator,
-lexer: Lexer,
-
+/// A type to represent general tokenization or semantic errors that the type-erased
+/// `Parser` may encounter. 
 pub const Error = union(enum) {
-    unexpected_arg_for_flag: struct {
-        flag_string: []const u8,
+    unexpected_arg_for_option: struct {
+        option: *const Option.Runtime,
         arg_string: []const u8,
     },
-    expected_arg_for_flag: struct {
-        flag_string: []const u8,
-        arg_ty_string: ?[]const u8,
+    expected_arg_for_option: *const Option.Runtime,
+    invalid_arg_for_option: struct {
+        option: *const Option.Runtime,
+        arg_repr: []const u8,
     },
-    invalid_arg_for_flag: struct {
-        flag_string: []const u8,
-        arg_string: []const u8,
-        arg_ty_string: ?[]const u8,
-    },
-    unknown_command: struct {
-        found: []const u8,
-        candidates: []const []const u8,
-    },
-    unknown_short_flag: struct {
+    unknown_short_option: struct {
+        candidates: []const Option.Runtime,
         found: u21,
-        candidates: []const u21,
     },
-    unknown_long_flag: struct {
+    unknown_long_option: struct {
+        /// This slice is filled with candidate options that may or may not
+        /// be associaed with
+        candidates: []const Option.Runtime,
         found: []const u8,
-        candidates: []const []const u8,
     },
     invalid_positional: struct {
+        positional: *const Positional.Runtime,
         arg_string: []const u8,
-        arg_ty_string: ?[]const u8,
-        positional_display_name: []const u8,
     },
-    /// Payload is the argument of the first extra positional found.
-    too_many_positionals: []const u8,
+    too_many_positionals: struct {
+        /// The underlying `Args` which were attempted to be parsed.
+        args: Args,
+        /// The offset into `args` at which the first extra positional was found.
+        offset: usize,
+    },
     /// Payload is the display names of the required positionals.
-    missing_positionals: []const []const u8,
-    no_command_provided,
-    /// Payload is the handler.
-    custom: struct {
-        context: Context,
-        handler: *const fn(*Parser, Context, std.io.AnyWriter, TtyConfig) void,
-    },
+    missing_positionals: []const Positional.Runtime,
+    missing_required_option: *const Option.Runtime,
+    /// Payload is the message. Note that [format] will *not* prepend an `"error: ..."`
+    /// to the message and will not add coloration to the output.
+    custom: []const u8,
 
-    pub fn fmt(context: Context, comptime format_string: []const u8, args: anytype) Error {
-        // FIXME: this hack is incredibly wasteful with respect to binary size.
-        // *Each* call to `fmt` needs to reserve 4096 bytes, which will add up quickly.
-        // Ideally, only one buffer would be needed (but this would introduce other problems, such as
-        // returning errors within errors overwriting buffer contents if unchecked!).
-        const S = struct {
-            pub var buf: [4096]u8 = undefined;
-            pub var formatted: []u8 = undefined;
-
-            fn func(_: *Parser, _: Context, writer: std.io.AnyWriter, config: TtyConfig) void {
-                config.setColor(writer, .bold) catch {};
-                config.setColor(writer, .red) catch {};
-                writer.writeAll("error:") catch {};
-                config.setColor(writer, .reset) catch {};
-                writer.writeByte(' ') catch {};
-                writer.writeAll(formatted) catch {};
-                writer.writeByte('\n') catch {};
-            }
-        };
-
-        S.formatted = std.fmt.bufPrint(&S.buf, format_string, args) catch @panic("TODO: truncate long error messages");
-
-        return .{ .custom = .{ .context = context, .handler = &S.func } };
+    pub fn fmt(err: *const Error, p: *Parser, audience: argz.Audience, tty_conf: std.Io.tty.Config) std.fmt.Alt(Data, Data.format) {
+        return std.fmt.alt(Data{ .err = err, .p = p, .audience = audience, .tty_conf = tty_conf }, .format);
     }
+
+    pub const Data = struct {
+        p: *Parser,
+        err: *const Error,
+        audience: argz.Audience, 
+        tty_conf: std.Io.tty.Config,
+
+        pub fn format(data: Data, writer: *std.Io.Writer) Writer.Error!void {
+            const err, const audience, const tty_conf = .{ data.err, data.audience, data.tty_conf };
+            _ = audience; // TODO use this when error notes are reimplemented
+
+            if (data.err.* != .custom) {
+                writeColoredError(tty_conf, writer) catch return error.WriteFailed;
+            }
+            switch (err.*) {
+                .unexpected_arg_for_option => |info| {
+                    const use_long = info.option.long != null;
+                    if (use_long)
+                        assert(info.option.short != null);
+
+                    try writer.print("found unexpected argument '{s}' for option '{f}'", .{
+                        info.arg_string,
+                        info.option
+                    });
+                },
+                .expected_arg_for_option => |opt| {
+                    try writer.print("expected argument of type '{s}' for option '{f}'", .{opt.type_name, opt});
+                },
+                .invalid_arg_for_option => |info| {
+                    try writer.print("argument '{s}' to flag '{f}' is invalid", .{ info.arg_repr, info.option });
+                },
+                .unknown_long_option => |info| {
+                    try writer.print("unknown option '--{s}'", .{info.found});
+                },
+                .unknown_short_option => |info| {
+                    try writer.print("unknown option '-{u}'", .{info.found});
+                },
+                .invalid_positional => |info| {
+                    try writer.print("invalid argument '{s}' for positional '{s}'", .{
+                        info.arg_string,
+                        info.positional.display,
+                    });
+                },
+                .too_many_positionals => |_| {
+                    var first_word: bool = false;
+                    while (data.p.interface.next()) |arg| {
+                        switch (arg) {
+                            .word => |word| {
+                                if (!first_word) {
+                                    try writer.print("found extra positional '{s}'", .{word});
+                                    first_word = true;
+                                }
+                            },
+                            else => {},
+                        }
+                    }
+                    // TODO add notes for other extra positionals provided
+                },
+                .missing_positionals => |missing| {
+                    try writer.print("missing positional '{s}'", .{missing[0].display});
+                    // TODO add notes for other misssng positionals
+                },
+                .missing_required_option => |missing| {
+                    try writer.print("missing required option '{f}'", .{missing});
+                },
+                .custom => |custom| try writer.writeAll(custom),
+            }
+        }
+    };
+
+    /// Returns a statically-allocated buffer to use for specialized
+    /// formatting of errors beyond what can be done using the variants
+    /// provided in the type-erased [Parser.Error].
+    pub fn getStackBuffer() ?[]u8 {
+        if (stack_buffer_granted)
+            return null;
+
+        stack_buffer_granted = true;
+        return &stack_buffer;
+    }
+
+    /// Asserts that the stack buffer has already been lended out via a call
+    /// to [getStackBuffer].
+    pub fn releaseStackBuffer() void {
+        assert(stack_buffer_granted);
+        stack_buffer_granted = false;
+        stack_buffer = undefined;
+    }
+
+    pub fn initFmtBuf(buf: []u8, tty_config: std.Io.tty.Config, comptime format_string: []const u8, args: anytype) Writer.Error!Error {
+        var w: Writer = .fixed(buf);
+        return initFmt(&w, tty_config, format_string, args);
+    }
+
+    pub fn initFmt(writer: *Writer, tty_config: std.Io.tty.Config, comptime format_string: []const u8, args: anytype) Writer.Error!Error {
+        writeColoredError(writer, tty_config) catch return error.WriteFailed;
+        try writer.print(format_string, args);
+        try writer.writeByte('\n');
+
+        return .{ .custom = writer.buffered() };
+    }
+
+    // This will silently handle a small buffer by stating that the message was truncated.
+    pub fn initFmtStatic(tty_config: std.Io.tty.Config, comptime format_string: []const u8, args: anytype) error{AlreadyAllocated}!Error {
+        const buf = getStackBuffer() orelse return error.AlreadyAllocated;
+        var w: Writer = .fixe(buf);
+        return initFmt(&w, tty_config, format_string, args) catch blk: {
+            const truncated_msg = "<truncated>";
+            const space = w.buffered();
+            @memcpy(
+                space[space.len -| truncated_msg.len..],
+                truncated_msg[@min(space.len, truncated_msg.len)],
+            );
+            break :blk .{ .custom = w.buffered() };
+        };
+    }
+
+    fn writeColoredError(tty_config: std.Io.tty.Config, writer: *Writer) (Writer.Error || error{Unexpected})!void {
+        try tty_config.setColor(writer, .bold);
+        try tty_config.setColor(writer, .red);
+        try writer.writeAll("error:");
+        try tty_config.setColor(writer, .reset);
+        try writer.writeByte(' ');
+    }
+
+    /// Global, per-thread stack-allocated buffer reserved for use in formatting errors.
+    threadlocal var stack_buffer: [4096]u8 = undefined;
+    /// Whether `stack_buffer` has already been lended out. Set to `true` and `false`
+    /// in [getStackBuffer] and [releaseStackBuffer] respectively.
+    threadlocal var stack_buffer_granted: bool = false;
 };
 
-pub fn init(args: Args, options: Options) !Parser {
+pub fn init(interface: Interface, options: Options) Parser {
     const stdout_color, const stderr_color = switch (options.color_mode) {
         .disable => .{ .no_color, .no_color },
         .detect => blk: {
-            const stdout = std.io.getStdOut();
-            const stderr = std.io.getStdErr();
-            break :blk .{ std.io.tty.detectConfig(stdout), std.io.tty.detectConfig(stderr) };
+            const stdout = std.fs.File.stdout();
+            const stderr = std.fs.File.stderr();
+            break :blk .{ std.Io.tty.detectConfig(stdout), std.Io.tty.detectConfig(stderr) };
         },
         .force => .{ .escape_codes, .escape_codes },
     };
@@ -178,467 +351,147 @@ pub fn init(args: Args, options: Options) !Parser {
         .program_name = options.program_name,
         .program_description = options.program_description,
         .allocator = options.allocator,
-        .lexer = try Lexer.init(args),
+        .interface = interface,
     };
 }
 
+pub fn parse(p: *Parser, comptime T: type) (error{ParseError} || Allocator.Error)!T {
+    var result: T = undefined;
 
-pub fn parse(p: *Parser, comptime config: Config) !ParseReturnType(config) {
-    if (config.support_allocation and p.allocator == null)
-        @panic("the current configuration requires a memory allocator, but the application did not provide one.");
-    return p.parseInner(config.mode, config.top_level_flags, &.{}, config);
-}
+    var found_options = if (@hasField(T, "options"))
+        std.StaticBitSet(@typeInfo(@FieldType(T, "options")).@"struct".fields.len).initEmpty()
+    else 
+        {};
 
-pub fn parseInner(p: *Parser, comptime mode: Mode, comptime flags: []const Flag, comptime command_stack: []const Command, comptime config: Config) !types.WrapModeAndFlags(mode, flags) {
-    var result: types.WrapModeAndFlags(mode, flags) = undefined;
-    var last_positional_index: ?usize = null;
+    const opts: []const Option = gatherOptionCandidates(T);
+    const positionals: []const Positional = gatherPositionals(T);
+
+    comptime {
+        if (@hasField(T, "options") and opts.len == 0)
+            @compileError("redundant 'options' field with zero fields of its own");
+
+        if (@hasField(T, "positionals") and positionals.len == 0)
+            @compileError("redundant 'positionals' field with zero fields of its own");
+    }
+
     var positional_index: usize = 0;
-    var set_flags: std.StaticBitSet(flags.len) = .initEmpty(); 
-    var found_command = false;
-    // includes both primary flag strings and their aliases
-    const all_long_flags, const all_short_flags = comptime blk: {
-        var longs: []const [:0]const u8 = &.{};
-        var shorts: []const u21 = &.{};
-        for (flags) |flag| {
-            longs = longs ++ (if (flag.long) |long| .{ long } else .{}) ++ format.getAliasStrings(flag);
-            shorts = shorts ++ if (flag.short) |char| .{ char } else .{};
-        }
-        break :blk .{ longs, shorts };
-    };
-    errdefer {
-        flags: {
-            if (comptime flags.len == 0)
-                break :flags;
-            var it = set_flags.iterator(.{});
-            while (it.next()) |index| {
-                switch (index) {
-                    inline 0...flags.len - 1 => |i| {
-                        const flag = flags[i];
-                        if (types.custom.isCustomType(flag.type, .flag)) {
-                            flag.type.deinitWithContext(.flag, p, &@field(result.flags, flag.fieldName()));
-                        } else if (types.requiresAllocator(flag.type)) {
-                            p.allocator.?.free(@field(result.flags, flag.fieldName()));
-                        }
-                    },
-                    else => unreachable,
-                }
-            }
-        }
-        mode: {
-            switch (mode) {
-                .commands => |commands| {
-                    if (comptime commands.len == 0)
-                        break :mode;
-                    if (!found_command)
-                        break :mode;
-                    top: inline for (commands) |cmd| {
-                        const tag = std.meta.stringToEnum(std.meta.FieldEnum(@TypeOf(result.command)), cmd.cmd).?;
-                        if (tag == result.command) {
-                            p.freeFlags(cmd.flags, &@field(result.command, cmd.fieldName()).flags);
-                            p.freeMode(cmd.mode, &@field(result.command, cmd.fieldName()));
-                            break :top;
-                        }
-                    }
-                },
-                .positionals => |positionals| {
-                    if (comptime positionals.len == 0)
-                        break :mode;
-                    switch (positional_index) {
-                        inline 0...positionals.len - 1 => |i| {
-                            inline for (0..i) |j| {
-                                const positional = positionals[j];
-                                if (types.custom.isCustomType(positional.type, .positional)) {
-                                    positional.type.deinitWithContext(.positional, p, &@field(result.positionals, positional.fieldName()));
-                                } else if (types.requiresAllocator(positional.type)) {
-                                    p.allocator.?.free(@field(result.positionals, positional.fieldName()));
-                                }
-                            }
-                        },
-                        else => unreachable,
-                    }
-                },
-            }
-        }
-    }
-    top: while (p.lexer.nextToken()) |tok| {
+
+    _ = &positionals;
+    _ = &positional_index;
+
+    while (p.interface.vtable.next(p.interface.context)) |tok| {
         switch (tok) {
-            .long_flag => |lf| {
-                inline for (flags, 0..) |flag, i| {
-                    if (flag.long) |long| {
-                        if (std.mem.eql(u8, lf, long)) {
-                            const env: Environment = comptime .{
-                                .context = .{ .flag = .{
-                                    .flag_string = flag.flagString(.long),
-                                    .flag_ty_string = format.typeString(flag.type, .flag),
-                                } },
-                                .command_stack = command_stack,
-                                .current_mode = mode,
-                                .flags = flags,
-                                .top_level_config = config,
-                            };
-                            try p.handleFlag(&result.flags, &set_flags, env, flag, .long, long, i);
-                            continue :top;
-                        }
-                        inline for (flag.aliases) |alias| {
-                            const repr = alias.flagString();
-                            switch (alias) {
-                                .long => |long_alias| {
-                                    if (std.mem.eql(u8, lf, long)) {
-                                        const env: Environment = comptime .{
-                                            .context = .{ .flag = .{
-                                                .flag_string = repr,
-                                                .flag_ty_string = format.typeString(flag.type, .flag),
-                                            } },
-                                            .command_stack = command_stack,
-                                            .current_mode = mode,
-                                            .flags = flags,
-                                            .top_level_config = config,
-                                        };
-                                        try p.handleFlag(&result.flags, &set_flags, env, flag, .long, long_alias, i);
-                                        continue :top;
-                                    }
-                                },
-                                else => {},
-                            }
-                        }
-                         
+            .long_option => |opt| {
+                if (@hasField(T, "options")) {
+                    inline for (0.., opts) |i, comptime_opt| {
+                       if (comptime_opt.long) |long| {
+                           if (std.mem.eql(u8, long, opt.repr)) {
+                               try p.handleOption(comptime_opt, .{ .long = opt }, &@field(result.options, comptime_opt.field_name));
+                               found_options.set(i);
+                           }
+                       }
                     }
-                }
-                return p.fail(.{ .unknown_long_flag = .{
-                    .found = lf,
-                    .candidates = all_long_flags,
+                } else return p.fail(.{ .unknown_long_option = .{
+                    .found = opt.repr,
+                    .candidates = &.{},
                 } });
             },
-            .short_flag => |sf| {
-                inline for (flags, 0..) |flag, i| {
-                    if (flag.short) |short| {
-                        const short_as_string = comptime std.fmt.comptimePrint("{u}", .{short});
-                        if (sf == short) {
-                            const env: Environment = comptime .{
-                                .context = .{ .flag = .{
-                                    .flag_string = "-" ++ short_as_string,
-                                    .flag_ty_string = format.typeString(flag.type, .flag),
-                                } },
-                                .command_stack = command_stack,
-                                .current_mode = mode,
-                                .flags = flags,
-                                .top_level_config = config,
-                            };
-                            try p.handleFlag(&result.flags, &set_flags, env, flag, .short, short_as_string, i);
-                            continue :top;
-                        }
-                        inline for (flag.aliases) |alias| {
-                            switch (alias) {
-                                .short => |short_alias| {
-                                    if (sf == short_alias) {
-                                        const short_alias_as_string = comptime std.fmt.comptimePrint("{u}", .{short_alias});
-                                        const env: Environment = comptime .{
-                                            .context = .{ .flag = .{
-                                                .flag_string = "-" ++ short_alias_as_string,
-                                                .flag_ty_string = format.typeString(flag.type, .flag),
-                                            } },
-                                            .command_stack = command_stack,
-                                            .current_mode = mode,
-                                            .flags = flags,
-                                            .top_level_config = config,
-                                        };
-                                        try p.handleFlag(&result.flags, &set_flags, env, flag, .short, short_as_string, i);
-                                        continue :top;
-                                    }
-                                },
-                                else => {},
+            .short_option => |opt| {
+                if (@hasField(T, "options") and getConfigOption(T, "short_mappings") != null) {
+                    inline for (0.., opts) |i, comptime_opt| {
+                        if (comptime_opt.short) |short| {
+                            if (short == opt.repr) {
+                                try p.handleOption(comptime_opt, .{ .short = opt }, &@field(result.options, comptime_opt.field_name));
+                                found_options.set(i);
                             }
                         }
-                         
                     }
-                }
-                return p.fail(.{ .unknown_short_flag = .{
-                    .found = sf,
-                    .candidates = all_short_flags,
+                } else return p.fail(.{ .unknown_short_option = .{
+                    .found = opt.repr,
+                    .candidates = &.{},
                 } });
             },
-            .word => |word| switch (mode) {
-                .commands => |commands| {
-                    inline for (commands) |command| {
-                        if (std.mem.eql(u8, word, command.cmd)) {
-                            found_command = true;
-                            try command.callback(config, command, command_stack, mode, flags, p, command.cmd);
-                            result.command = @unionInit(@TypeOf(result.command), command.fieldName(), try p.parseInner(command.mode, command.flags, command_stack ++ .{command}, config)); 
-                            break :top;
-                        }
-                        inline for (command.aliases) |alias| {
-                            if(true)@panic("TOOO");
-                            if (std.mem.eql(u8, word, alias)) {
-                                found_command = true;
-                                try command.callback(config, command, command_stack, mode, flags, p, alias);
-                                result.command = @unionInit(@TypeOf(result.command), command.fieldName(), try p.parseInner(command.mode, command.flags, command_stack ++ .{command}, config)); 
-                                break :top;
-                            }
-                        }
-                    }
-                    const all_commands: []const [:0]const u8 = comptime blk: {
-                        var all: []const [:0]const u8 = &.{};
-                        for (commands) |command| {
-                            all = all ++ .{ command.cmd } ++ command.aliases;
-                        }
-                        break :blk all;
-                    };
-                    return p.fail(.{ .unknown_command = .{
-                        .found = word,
-                        .candidates = all_commands,
-                    } });
-                },
-                .positionals => |positionals| {
-                    if (std.mem.eql(u8, word, "--")) {
-                        p.lexer.found_force_stop = true;
-                        continue :top;
-                    }
-                    if (positional_index >= positionals.len) {
-                        return p.fail(.{ .too_many_positionals = word });
-                    }
-                    if (comptime positionals.len == 0)
-                        unreachable;
-                    defer last_positional_index = positional_index;
-                    switch (positional_index) {
-                        inline 0...positionals.len => |pi| {
-                            if (comptime pi == positionals.len)
-                                unreachable;
-                            const positional = positionals[pi];
-                            const arg = blk: {
-                                if (types.custom.isCustomType(positional.type, .positional)) {
-                                    switch (types.custom.customTypeArgumentMode(positional.type)) {
-                                        .mandatory, .optional => break :blk word,
-                                        .none => @compileError("positionals must not take no argument"),
-                                    }
-                                } else break :blk word;
-                            };
-                            const env: Environment = comptime .{
-                                .context = .{ .positional = .{
-                                    .positional_display = positional.displayString(),
-                                    .positional_ty_string = format.typeString(positional.type, .positional),
-                                } },
-                                .command_stack = &.{},
-                                .current_mode = mode,
-                                .flags = flags,
-                                .top_level_config = config,
-                            };
-                            if (types.custom.isCustomType(positional.type, .positional)) {
-                                if (types.custom.customTypeIsRepeatable(positional.type)) {
-                                    if (last_positional_index == null or positional_index > last_positional_index.?) {
-                                        @field(result.positionals, positional.fieldName()) = comptime positional.type.defaultValue(.positional) orelse @compileError("default value required for positional type '" ++ @typeName(positional.type) ++ "'");
-                                    }
-                                } else {
-                                    positional_index += 1;
-                                }
-                            } else {
-                                positional_index += 1;
-                            }
-                            try values.parseValueAuto(positional.type, &@field(result.positionals, positional.fieldName()), p, arg, env, 0);
-                        },
-                        else => unreachable,
-                    }
-                },
+            .force_stop => {},
+            .word => |word| {
+                _ = word;
+                @panic("TODO");
             },
-            .flag_eq => @panic("token 'flag_eq' found unexpectedly. This is a bug."),
-            .err => @panic("TODO"),
+            .err => @panic("TODO: tokenization errors"),
         }
     }
-
-    switch (mode) {
-        .positionals => |positionals| top: {
-            if (comptime positionals.len == 0)
-                break :top;
-            while (positional_index != positionals.len) : (positional_index += 1) {
-                switch (positional_index) {
-                    inline 0...positionals.len - 1 => |pi| {
-                        const positional_displays_from_here: []const []const u8 = comptime blk: {
-                            var displays: [positionals.len - pi][]const u8 = undefined;
-                            for (pi..positionals.len) |i| {
-                                displays[i - pi] = positionals[i].displayString();
-                            }
-                            const as_const = displays;
-                            break :blk &as_const;
-                        };
-                        const positional = positionals[pi];
-                        if (types.custom.isCustomType(positional.type, .positional)) {
-                            if (last_positional_index == positional_index)
-                                break :top;
-                            if (types.custom.customTypeIsRepeatable(positional.type)) {
-                                @field(result.positionals, positional.fieldName()) = comptime positional.type.defaultValue(.positional) orelse @compileError("default value required for positional type '" ++ @typeName(positional.type) ++ "'");
-                            }
-                        } else if (@typeInfo(positional.type) == .optional) {
-                            inline for (pi..positionals.len) |i| {
-                                @field(result.positionals, positionals[i].fieldName()) = null;
-                            }
-                        } 
-                        return p.fail(.{ .missing_positionals = positional_displays_from_here });
-                    },
-                    else => unreachable,
-                }
-            }
-        },
-        .commands => if (!found_command) return p.fail(.no_command_provided),
-    }
-
-    // TODO I'm guessing this doesn't work.
-    try @import("Parser/dependency.zig").ensureFlagDependenciesSatisfied(p, flags, &result.flags, &set_flags);
-
-    {
-        const required_flags = requiredFlagsBitSet(flags);
-        inline for (0..flags.len) |i| {
-            const flag = flags[i];
-            const context: Context = comptime .{ .flag = .{
-                .flag_string = flag.flagString(.auto),
-                .flag_ty_string = format.typeString(flag.type, .flag),
-            } };
-            if (required_flags.isSet(i)) {
-                if (!set_flags.isSet(i)) {
-                    if (flags[i].defaultValue()) |dv| {
-                        @field(result.flags, flags[i].fieldName()) = dv;
-                    } else {
-                        return p.fail(.fmt(context, "missing required flag '{s}'", .{flag.flagString(.auto)}));
-                    }
-                }
-            } else if (!set_flags.isSet(i)) {
-                @field(result.flags, flags[i].fieldName()) = comptime flag.defaultValue() orelse @compileError("non-mandatory flag must have a default value");
+    if (@hasField(T, "options")) {
+        var unset = found_options.iterator(.{ .kind = .unset });
+        
+        while (unset.next()) |unset_bit| {
+            switch (unset_bit) {
+                inline 0...opts.len - 1 => |i| {
+                    if (opts[i].defaultValue()) |dv|
+                        @field(result.options, opts[i].field_name) = dv
+                    else
+                        return p.fail(.{ .missing_required_option = comptime &opts[i].toRuntime() });
+                },
+                else => unreachable,
             }
         }
-
     }
+
     return result;
 }
 
-pub fn deinit(p: *Parser, comptime config: Config, data: *ParseReturnType(config)) void {
-    p.freeFlags(config.top_level_flags, &data.flags);
-    p.freeMode(config.mode, switch (config.mode) {
-        .commands => &data.command,
-        .positionals => &data.positionals,
-    });
-}
-
-fn freeCommandUnion(p: *Parser, comptime cmd: Command, data: anytype) void {
-    switch (data) {
-        inline else => |active_data| {
-            p.freeFlags(cmd.flags, &active_data.flags);
-            switch (cmd.mode) {
-                .commands => p.freeMode(cmd.mode, &active_data.command),
-                .positionals => p.freeMode(cmd.mode, &active_data.positionals),
-            }
-        },
-    }
-}
-
-fn freeFlags(p: *Parser, comptime flags: []const Flag, flag_data: anytype) void {
-    inline for (flags) |flag| {
-        if (types.custom.isCustomType(flag.type, .flag)) {
-            flag.type.deinitWithContext(.flag, p, &@field(flag_data, flag.fieldName()));
-        } else if (types.requiresAllocator(flag.type)) {
-            p.allocator.?.free(@field(flag_data, flag.fieldName()));
-        }
-    }
-}
-
-fn freeMode(p: *Parser, comptime mode: Mode, mode_data: anytype) void {
-    switch (mode) {
-        .commands => |commands| {
-            top: inline for (commands) |cmd| {
-                const tag = std.meta.stringToEnum(std.meta.FieldEnum(@TypeOf(mode_data)), cmd.cmd).?;
-                if (tag == mode_data) {
-                    p.freeCommandUnion(cmd, &@field(mode_data, cmd.fieldName()));
-                    break :top;
-                }
-            }
-        },
-        .positionals => |positionals| {
-            inline for (positionals) |positional| {
-                if (types.custom.isCustomType(positional.type, .positional)) {
-                    positional.type.deinitWithContext(.positional, p, &@field(mode_data, positional.fieldName()));
-                } else if (types.requiresAllocator(positional.type)) {
-                    p.allocator.?.free(@field(mode_data, positional.fieldName()));
-                }
-            }
-        },
-    }
-}
-
-inline fn requiredFlagsBitSet(comptime flags: []const Flag) std.StaticBitSet(flags.len) {
-    var result: std.StaticBitSet(flags.len) = .initEmpty();
-    inline for (flags, 0..) |flag, i| {
-        if (flag.defaultValue() == null)
-            result.set(i);
-    }
-    return result;
-}
-
-inline fn handleFlag(
+pub fn handleOption(
     p: *Parser,
-    flag_data: anytype,
-    set_flags: anytype,
-    comptime env: Environment,
-    comptime flag: Flag,
-    comptime repr: enum { long, short },
-    comptime flag_string: []const u8,
-    comptime index: usize,
-) !void {
-    if (types.custom.isCustomType(flag.type, .flag)) {
-        if (types.custom.customTypeIsRepeatable(flag.type)) {
-            if (!set_flags.isSet(index))
-                @field(flag_data, flag.fieldName()) = comptime flag.defaultValue() orelse @compileError("default value required for flag type '" ++ @typeName(flag.type) ++ "'");
-        } else if (set_flags.isSet(index)) {
-            return p.fail(.fmt(env.context, "flag '{s}' found multiple times", .{ env.context.flag.flag_string }));
-        }
-
-        set_flags.set(index);
-        var first_arg: ?[]const u8 = null;
-        const allows_leading_dash = types.custom.customTypeAllowsLeadingDash(flag.type);
-        switch (types.custom.customTypeArgumentMode(flag.type)) {
-            .mandatory => {
-                switch (repr) {
-                    .long => {
-                        _ = p.lexer.maybe(&.{ .flag_eq });
-                        first_arg = try p.lexer.argument(allows_leading_dash);
-                    },
-                    .short => first_arg = try p.lexer.argument(allows_leading_dash),
-                }
-            },
-            .optional => {
-                if (p.lexer.maybe(&.{ .flag_eq })) |_| {
-                    first_arg = try p.lexer.argument(allows_leading_dash);
-                }
-            },
-            .none => if (repr == .long and p.lexer.maybe(&.{ .flag_eq }) != null) {
-                return p.fail(.{ .unexpected_arg_for_flag = .{ .flag_string = flag_string, .arg_string = p.lexer.argument(allows_leading_dash) catch unreachable } });
-            },
-        }
-        try flag.type.parseWithContext(env, first_arg, p, &@field(flag_data, flag.fieldName()), 0);
-    } else if (set_flags.isSet(index)) {
-        return p.fail(.fmt(.{.flag = .{ .flag_string = flag_string, .flag_ty_string = format.typeString(flag.type, .flag) } }, "flag '{s}' found multiple times", .{ env.context.flag.flag_string }));
-    } else {
-        set_flags.set(index);
-        if (flag.type == void) {
-            @field(flag_data, flag.fieldName()) = true;
-        } else {
-            if (repr == .long)
-                _ = p.lexer.maybe(&.{ .flag_eq });
-            const arg = p.lexer.argument(types.typeSupportsLeadingDash(flag.type, .flag)) catch return p.fail(.{ .expected_arg_for_flag = .{
-                .flag_string = flag_string,
-                .arg_ty_string = format.typeString(flag.type, .flag),
-            } });
-            try values.parseValueAuto(flag.type, &@field(flag_data, flag.fieldName()), p, arg, env, 0);
-        }
+    comptime opt: Option,
+    token: Token.Option,
+    dest_ptr: anytype
+) error{ParseError}!void {
+    switch (@typeInfo(opt.type)) {
+        .optional => {
+            if (token.attachedArg()) |arg| {
+                dest_ptr.* = try values.parseValue(p, arg, .{ .option = opt });
+            } else {
+                dest_ptr.* = null;
+            }
+        },
+        .bool => {
+            if (token.attachedArg()) |arg| {
+                if (mem.eql(u8, "true", arg))
+                    dest_ptr.* = true
+                else if (std.mem.eql(u8, "false", arg))
+                    dest_ptr.* = false
+                else return p.fail(.{ .invalid_arg_for_option = .{
+                    .arg_repr = arg,
+                    .option = comptime &opt.toRuntime()
+                } });
+            } else {
+                dest_ptr.* = true;
+            }
+        },
+        else => |info| {
+            const arg = token.getArg(p, types.mayHaveLeadingDash(@Type(info))) orelse return p.fail(.{ .expected_arg_for_option = comptime &opt.toRuntime() });
+            dest_ptr.* = try values.parseValue(p, arg, .{ .option = opt });
+        },
     }
 }
-
-fn ParseReturnType(comptime config: Config) type {
-    return types.WrapModeAndFlags(config.mode, config.top_level_flags);
-}
-
 
 pub fn fail(p: *Parser, err: Error) error{ParseError} {
-    var stderr = std.io.getStdErr();
+    var buf: [64]u8 = undefined;
+
+    var stderr = std.fs.File.stderr();
     stderr.lock(.exclusive) catch return error.ParseError;
-    formatters.errors(p.stderr_config, err, p, stderr.writer().any()) catch return error.ParseError;
+    defer stderr.unlock();
+
+    var w = stderr.writer(&buf);
+    defer w.interface.flush() catch {};
+
+    w.interface.print("{f}", err.fmt(p, .default, p.stderr_config)) catch {};
+
     return error.ParseError;
+}
+
+pub fn failFmt(p: *Parser, comptime format_string: []const u8, args: anytype) error{ParseError} {
+    const err: Error = .initFmtStatic(p.stderr_config, format_string, args);
+    defer Error.releaseStackBuffer();
+    return p.fail(err);
 }
 
 pub fn fatal(p: *const Parser, comptime fmt: []const u8, args: anytype) noreturn {
@@ -646,3 +499,113 @@ pub fn fatal(p: *const Parser, comptime fmt: []const u8, args: anytype) noreturn
     std.process.exit(1);
 }
 
+inline fn isVariadicArgument(comptime positional: Positional) bool {
+    return comptime state: switch (@typeInfo(positional.type)) {
+        .optional => |opt| continue :state opt.child,
+        .pointer => |info| info.size == .slice and !(info.child == u8 and info.is_const),
+        else => false,
+    };
+}
+
+inline fn gatherOptionCandidates(comptime T: type) []const Option {
+    if (!@hasField(T, "options"))
+        return &.{};
+
+    const struct_fields = @typeInfo(@FieldType(T, "options")).@"struct".fields;
+    const substitute_underscore_with_minus = getConfigOption(T, "substitute_underscore_with_minus") orelse true;
+
+    comptime var result: [struct_fields.len]Option = undefined;
+    inline for (0.., struct_fields) |i, field| {
+        comptime var opt: Option = .{
+            .field_name = field.name,
+            .default_value_ptr = field.default_value_ptr,
+            .type = field.type,
+            .long = null,
+            .short = null,
+        };
+
+        if (substitute_underscore_with_minus) {
+            comptime var new: [field.name.len:0]u8 = @splat(0);
+            inline for (0.., field.name) |j, byte| {
+                if (byte == '_')
+                    new[j] = '-'
+                else
+                    new[j] = byte;
+            }
+
+            const as_const = new;
+            opt.long = &as_const;
+        } else {
+            opt.long = field.name;
+        }
+
+        if (getConfigOption(T, "alt_type_names")) |AltTypeNames| {
+            if (@hasDecl(AltTypeNames, field.name))
+                opt.alt_type_name = @field(AltTypeNames, field.name);
+        }
+
+        if (getConfigOption(T, "short_mappings")) |ShortMappings| {
+            if (@hasDecl(ShortMappings, field.name)) {
+                const char: u21 = @field(T.config.short_mappings, field.name);
+                // Special case: if the field name is the same as the (string) representation
+                // of the short mapping, then just the short flag is non-null in the resulting option.
+                if (comptime std.mem.eql(u8, field.name, &std.unicode.utf8EncodeComptime(char)))
+                    opt.long = null;
+                opt.short = @field(T.config.short_mappings, field.name);
+            }
+        }
+
+        result[i] = opt;
+    }
+
+    const as_const = result;
+    return &as_const;
+}
+
+pub inline fn gatherPositionals(comptime T: type) []const Positional {
+    if (!@hasDecl(T, "positionals"))
+        return &.{};
+
+    const decls = @typeInfo(@TypeOf(T.positionals)).@"struct".decls;
+    const substitute_underscore_with_minus = getConfigOption(T, "substitute_underscore_with_minus") orelse true;
+    comptime var result: [decls.len]Positional = undefined;
+
+    inline for (0.., decls) |i, decl| {
+        comptime var pos: Positional = .{
+            .type = @TypeOf(@field(T.positionals, decl.name)),
+            .field_name = decl.name,
+            .display = decl.name
+        };
+
+        if (substitute_underscore_with_minus) {
+            comptime var new: [decl.name.len :0]u8 = @splat(0);
+            inline for (0.., decl.name) |j, byte| {
+                if (byte == '_')
+                    new[j] = '-'
+                else
+                    new[j] = byte;
+            }
+            const as_const = &new;
+            pos.display = &as_const;
+        }
+
+        result[i] = pos;
+    }
+
+    const as_const = result;
+    return &as_const;
+}
+
+pub inline fn getConfigOption(comptime T: type, comptime option: []const u8) GetConfigOptionReturnType(T, option) {
+    if (@hasDecl(T, "config") and @hasDecl(T.config, option))
+        return @field(T.config, option)
+    else
+        return null;
+}
+
+inline fn GetConfigOptionReturnType(comptime T: type, comptime option: []const u8) type {
+    if (@hasDecl(T, "config") and @hasDecl(T.config, option))
+        return ?@TypeOf(@field(T.config, option))
+    else
+        return @Type(.null);
+}

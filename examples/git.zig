@@ -3,7 +3,7 @@ const argz = @import("argz");
 const builtin = @import("builtin");
 
 const cfg: argz.Config = .{
-    .top_level_flags = &.{.help},
+    .top_level_options = &.{.help},
     .mode = .{ .commands = &.{
         .init(
             "clone",

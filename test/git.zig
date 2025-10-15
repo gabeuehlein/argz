@@ -8,7 +8,7 @@ const std = @import("std");
 const argz = @import("argz");
 
 const cfg: argz.Config = .{
-    .top_level_flags = &.{.help},
+    .top_level_options = &.{.help},
     .mode = .{ .commands = &.{
         .init(
             "clone",
@@ -27,6 +27,7 @@ const cfg: argz.Config = .{
 };
 
 pub fn main() !void {
+    if(true) return;
     var arg_parser: argz.Parser = try .init(argz.SystemArgs.init(), .{
         .program_name = "git",
         .program_description = "an imitation of the Git SCM tool's CLI",

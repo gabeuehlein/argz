@@ -1,4 +1,6 @@
 const std = @import("std");
+const argz = @import("src/argz.zig");
+const Allocator = std.mem.Allocator;
 
 const Example = enum {
     echo,
@@ -9,16 +11,35 @@ const Example = enum {
     readme,
 };
 
+const Audience = enum {
+    user,
+    developer,
+    computer,
+};
+
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
 
     const optimize = b.standardOptimizeOption(.{});
 
+    const build_options = b.addOptions();
     const mod = b.addModule("argz", .{
         .root_source_file = b.path("src/argz.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+        },
     });
+    mod.addOptions("build_options", build_options);
+    build_options.addOption(
+        Audience,
+        "target_audience",
+        b.option(Audience, "target_audience", "manual override for who will be reading messages") orelse switch (optimize) {
+            .Debug => .developer,
+            .ReleaseFast, .ReleaseSafe => .user,
+            .ReleaseSmall => .computer,
+        },
+    );
 
     const example = b.option([]const u8, "example", "the example to run");
 
@@ -65,19 +86,27 @@ fn createTests(b: *std.Build, step: *std.Build.Step, target: std.Build.ResolvedT
 
 fn buildTest(b: *std.Build, step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, argz_module: *std.Build.Module, file: std.Build.LazyPath) !void {
     const gpa = b.allocator;
+
     var arena_allocator: std.heap.ArenaAllocator = .init(gpa);
     defer arena_allocator.deinit();
+
     var f = try std.fs.cwd().openFile(file.getPath(b), .{});
     defer f.close();
+
     var buf: [4096]u8 = undefined;
     var f_reader = f.reader(&buf);
-    var line_buf: std.ArrayList(u8) = .init(gpa);
+    const reader = &f_reader.interface;
+
+    var line_buf: std.Io.Writer.Allocating = .init(gpa);
     defer line_buf.deinit();
-    var stdout_expected_string: std.ArrayList(u8) = .init(gpa);
-    defer stdout_expected_string.deinit();
-    var stderr_expected_string: std.ArrayList(u8) = .init(gpa);
-    defer stderr_expected_string.deinit();
-    var expected_exit_code: u8= 0;
+
+    var stdout_expected_string: std.ArrayList(u8) = .empty;
+    defer stdout_expected_string.deinit(gpa);
+
+    var stderr_expected_string: std.ArrayList(u8) = .empty;
+    defer stderr_expected_string.deinit(gpa);
+
+    var expected_exit_code: u8 = 0;
 
     const test_exe = b.addExecutable(.{
         .name = std.fs.path.basename(file.getDisplayName()),
@@ -89,19 +118,21 @@ fn buildTest(b: *std.Build, step: *std.Build.Step, target: std.Build.ResolvedTar
     });
     test_exe.root_module.addImport("argz", argz_module);
     const exe = b.addRunArtifact(test_exe);
+
     while (true) {
         defer line_buf.clearRetainingCapacity();
-        try f_reader.readUntilDelimiterArrayList(&line_buf, '\n', std.math.maxInt(usize));
-        const line = line_buf.items;
+        _ = try reader.streamDelimiter(&line_buf.writer, '\n');
+        const line = line_buf.written();
+
         if (std.mem.startsWith(u8, line, "// args:")) {
             const rest = line["// args:".len..];
             try parseArgs(gpa, rest, file, exe);
         } else if (std.mem.startsWith(u8, line, "// expected(stdout):")) {
             const rest = line["// expected(stdout):".len..];
-            try tokenizeExpectedString(rest, file, &stdout_expected_string);
+            try tokenizeExpectedString(gpa, rest, file, &stdout_expected_string);
         } else if (std.mem.startsWith(u8, line, "// expected(stderr):")) {
             const rest = line["// expected(stderr):".len..];
-            try tokenizeExpectedString(rest, file, &stderr_expected_string);
+            try tokenizeExpectedString(gpa, rest, file, &stderr_expected_string);
         } else if (std.mem.startsWith(u8, line, "// expect-exit-code:")) {
             const rest = line["// expect-exit-code:".len..];
             expected_exit_code = try std.fmt.parseInt(u8, std.mem.trim(u8, rest, &std.ascii.whitespace), 0);
@@ -118,7 +149,7 @@ fn buildTest(b: *std.Build, step: *std.Build.Step, target: std.Build.ResolvedTar
 
 // Arbitrary escape sequences may be embedded in `string`, e.g. `foo bar\x30 baz` is the same as `foo bar0 baz`. The newline is
 // included, unless the next line contains only the string `IGNORE-LAST-NEWLINE`.
-fn tokenizeExpectedString(string: []const u8, path: std.Build.LazyPath, array_list: *std.ArrayList(u8)) !void {
+fn tokenizeExpectedString(gpa: Allocator, string: []const u8, path: std.Build.LazyPath, array_list: *std.ArrayList(u8)) !void {
     const trimmed = blk: {
         var trimmed_end = std.mem.trimRight(u8, string, &std.ascii.whitespace);
         if (trimmed_end.len != 0 and trimmed_end[0] == ' ') {
@@ -130,7 +161,7 @@ fn tokenizeExpectedString(string: []const u8, path: std.Build.LazyPath, array_li
     if (std.mem.eql(u8, trimmed, "IGNORE-LAST-NEWLINE")) {
         if (array_list.pop()) |chr| {
             if (chr != '\n')
-                std.debug.panic("path {s} has IGNORE-LAST-NEWLINE when previous character was not a newline, it is '{}'", .{ path.getDisplayName(), std.fmt.fmtSliceEscapeLower(&.{chr}) });
+                std.debug.panic("path {s} has IGNORE-LAST-NEWLINE when previous character was not a newline, it is '{c}'", .{ path.getDisplayName(), chr });
         } else std.debug.panic("path {s} contains IGNORE-LAST-NEWLINE as the first expected line", .{path.getDisplayName()});
         return;
     }
@@ -141,15 +172,15 @@ fn tokenizeExpectedString(string: []const u8, path: std.Build.LazyPath, array_li
             switch (char_literal) {
                 .success => |codepoint| {
                     var buf: [4]u8 = undefined;
-                    try array_list.appendSlice(buf[0..try std.unicode.utf8Encode(codepoint, &buf)]);
+                    try array_list.appendSlice(gpa, buf[0..try std.unicode.utf8Encode(codepoint, &buf)]);
                 },
                 .failure => std.debug.panic("path {s} contains an invalid escape sequence in an expected string", .{path.getDisplayName()}),
             }
         } else {
-            try array_list.append(trimmed[i]);
+            try array_list.append(gpa, trimmed[i]);
         }
     }
-    try array_list.append('\n');
+    try array_list.append(gpa, '\n');
 }
 
 fn parseArgs(gpa: std.mem.Allocator, string: []const u8, path: std.Build.LazyPath, run_step: *std.Build.Step.Run) !void {

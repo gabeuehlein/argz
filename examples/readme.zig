@@ -2,29 +2,29 @@ const std = @import("std");
 const argz = @import("argz");
 
 const config: argz.Config = .{
-    // Specifies the flags for the application
-    .top_level_flags = &.{
+    // Specifies the options for the application
+    .top_level_options = &.{
         .help,
-        // `void` represents a flag that takes no value.
+        // `void` represents an option that takes no value.
         // The corresponding field is set to either `true` or `false`
-        // depending on whether the flag was found or not.
+        // depending on whether the option was found or not.
         //
-        // Note: the parameters to `Flag.init` are (1) the flag's type, (2) the flag's short
-        // representation (if applicable), (3) the flag's long representation (if applicable),
-        // (4) the default value for this flag if it isn't provided (`null` indicates that the
-        // flag is mandatory), (5) a brief message describing the flag's usage, and (6) extra
-        // data describing various additional properties of the flag that are less common.
-        .init(void, 'f', "flag", null, "an example flag", .{}),
+        // Note: the parameters to `Option.init` are (1) the option's type, (2) the option's short
+        // representation (if applicable), (3) the option's long representation (if applicable),
+        // (4) the default value for this option if it isn't provided (`null` indicates that the
+        // option is mandatory), (5) a brief message describing the option's usage, and (6) extra
+        // data describing various additional properties of the option that are less common.
+        .init(void, 'f', "option", null, "an example option", .{}),
         // Optional parameters are supported as well. In this case,
-        // a correct usage of this flag would be `-j` or `-j=<u32>`.
-        // In the former case, the value corresponding to this flag
+        // a correct usage of this option would be `-j` or `-j=<u32>`.
+        // In the former case, the value corresponding to this option
         // would be `null`.
         .init(?u32, 'j', null, 1, "number of jobs to use", .{
-            // This overrides the field name of the flag in the resulting struct.
+            // This overrides the field name of the option in the resulting struct.
             // The priority for the field name is detailed below:
-            //   1. `.field_name` in the extra data passed to `Flag.init`
-            //   2. `flag.long`
-            //   3. `flag.short`
+            //   1. `.field_name` in the extra data passed to `Option.init`
+            //   2. `option.long`
+            //   3. `option.short`
             .field_name = "jobs",
         }),
     },
@@ -52,11 +52,11 @@ pub fn main() !void {
 
     const opts = try p.parse(config);
 
-    const jobs: u32 = opts.flags.jobs orelse 18;
+    const jobs: u32 = opts.options.jobs orelse 18;
     if (jobs == 0)
         p.fatal("jobs must not be zero", .{});
 
-    if (opts.flags.flag) {
+    if (opts.options.option) {
         std.debug.print("accelerating computation using the mysteries of the universe...\n", .{});
     }
 

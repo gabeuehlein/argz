@@ -11,7 +11,7 @@ const config: argz.Config = .{
             .field_name = "arg",
         }),
     } },
-    .top_level_flags = &.{
+    .top_level_options = &.{
         .init(argz.Multi(argz.Pair([]const u8, []const u8, '='), .dynamic), 's', "set", null, "set environment variable KEY to VAL", .{
             .alt_type_name = "KEY=VAL",
             .field_name = "set_vars",
@@ -47,16 +47,16 @@ pub fn main() !void {
     const opts = try p.parse(config);
 
     var env_map = try std.process.getEnvMap(arena.allocator());
-    if (opts.flags.clear) {
+    if (opts.options.clear) {
         var it = env_map.iterator();
         while (it.next()) |entry| {
             env_map.remove(entry.key_ptr.*);
         }
     }
-    for (opts.flags.unsets.items) |unset| {
+    for (opts.options.unsets.items) |unset| {
         env_map.remove(unset);
     }
-    for (opts.flags.set_vars.items) |def| {
+    for (opts.options.set_vars.items) |def| {
         try env_map.put(def[0], def[1]);
     }
     if (opts.positionals.program) |process| {

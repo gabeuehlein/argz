@@ -10,7 +10,7 @@ const Operator = enum {
 
 const config: argz.Config = .{
     .mode = .{ .positionals = &.{} },
-    .top_level_flags = &.{
+    .top_level_options = &.{
         .help,
         .init([4]?Operator, null, "operators", .{ .add, .sub, .mul, .div }, "a list of arithmetic operators to make questions with", .{ .alt_type_name = "OPERATOR" }),
         .init(i32, null, "min", -10, "the smallest number that a question can have", .{}),
@@ -27,10 +27,10 @@ pub fn main() !void {
     });
     const args = try p.parse(config);
 
-    if (args.flags.min > args.flags.max)
-        p.fatal("minimum value ({d}) must be greater than maximum value ({d})", .{ args.flags.min, args.flags.max });
+    if (args.options.min > args.options.max)
+        p.fatal("minimum value ({d}) must be greater than maximum value ({d})", .{ args.options.min, args.options.max });
 
-    const ops = args.flags.operators;
+    const ops = args.options.operators;
     const null_index = std.mem.indexOfScalar(?Operator, &ops, null) orelse ops.len;
     if (null_index == 0)
         p.fatal("at least one operator must be provided", .{});
@@ -45,11 +45,11 @@ pub fn main() !void {
 
     var question_no: u32 = 1;
     var question_input: [4096]u8 = undefined;
-    while (question_no <= args.flags.@"num-questions") : (question_no += 1) {
+    while (question_no <= args.options.@"num-questions") : (question_no += 1) {
         const index = rng.intRangeAtMost(usize, 0, null_index - 1);
         const op = ops[index].?;
-        const a = rng.intRangeAtMost(i32, args.flags.min, args.flags.max);
-        const b = rng.intRangeAtMost(i32, args.flags.min, args.flags.max);
+        const a = rng.intRangeAtMost(i32, args.options.min, args.options.max);
+        const b = rng.intRangeAtMost(i32, args.options.min, args.options.max);
         try out.print("Question {d}: {d} {s} {d} = ", .{ question_no, a, switch (op) {
             .add => "+",
             .sub => "-",
