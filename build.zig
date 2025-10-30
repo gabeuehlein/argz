@@ -22,6 +22,9 @@ pub fn build(b: *std.Build) !void {
 
     const optimize = b.standardOptimizeOption(.{});
 
+    var io_instance: std.Io.Threaded = .init_single_threaded;
+    const io = io_instance.io();
+
     const build_options = b.addOptions();
     const mod = b.addModule("argz", .{
         .root_source_file = b.path("src/argz.zig"),
@@ -67,10 +70,10 @@ pub fn build(b: *std.Build) !void {
     }
 
     const test_step = b.step("test", "run tests");
-    createTests(b, test_step, target, optimize, mod) catch |e| std.debug.panic("running tests failed: {s}", .{@errorName(e)});
+    createTests(b, io, test_step, target, optimize, mod) catch |e| std.debug.panic("running tests failed: {s}", .{@errorName(e)});
 }
 
-fn createTests(b: *std.Build, step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, argz_module: *std.Build.Module) !void {
+fn createTests(b: *std.Build, io: std.Io, step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, argz_module: *std.Build.Module) !void {
     const test_dir = b.path("test").getPath(b);
     var dir = try std.fs.cwd().openDir(test_dir, .{ .iterate = true });
     defer dir.close();
@@ -79,12 +82,12 @@ fn createTests(b: *std.Build, step: *std.Build.Step, target: std.Build.ResolvedT
         if (entry.kind != .file) continue;
         const file = b.path("test").path(b, entry.name);
         if (std.mem.eql(u8, std.fs.path.extension(entry.name), ".zig")) {
-            buildTest(b, step, target, optimize, argz_module, file) catch |e| std.debug.panic("test '{s}' failed: {s}", .{ file.getDisplayName(), @errorName(e) });
+            buildTest(b, io, step, target, optimize, argz_module, file) catch |e| std.debug.panic("test '{s}' failed: {s}", .{ file.getDisplayName(), @errorName(e) });
         }
     }
 }
 
-fn buildTest(b: *std.Build, step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, argz_module: *std.Build.Module, file: std.Build.LazyPath) !void {
+fn buildTest(b: *std.Build, io: std.Io, step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, argz_module: *std.Build.Module, file: std.Build.LazyPath) !void {
     const gpa = b.allocator;
 
     var arena_allocator: std.heap.ArenaAllocator = .init(gpa);
@@ -94,7 +97,7 @@ fn buildTest(b: *std.Build, step: *std.Build.Step, target: std.Build.ResolvedTar
     defer f.close();
 
     var buf: [4096]u8 = undefined;
-    var f_reader = f.reader(&buf);
+    var f_reader = f.reader(io, &buf);
     const reader = &f_reader.interface;
 
     var line_buf: std.Io.Writer.Allocating = .init(gpa);

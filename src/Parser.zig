@@ -26,7 +26,6 @@ stderr_config: std.Io.tty.Config,
 program_name: ?[]const u8,
 program_description: ?[]const u8,
 
-
 pub const Interface = struct {
     vtable: *const VTable,
     context: *anyopaque,
@@ -43,9 +42,10 @@ pub const Interface = struct {
         iface: *Interface,
         options: []const Option.Runtime,
         positionals: []const Positional.Runtime,
-        writer: *Writer
+        option_descriptions: std.StaticStringMap([:0]const u8),
+        writer: *Writer,
     ) Writer.Error!void {
-        return iface.vtable.format_help(iface.context, options, positionals, writer);
+        return iface.vtable.format_help(iface.context, options, positionals, option_descriptions, writer);
     }
 
     pub fn handleError(iface: *Interface, parser: *Parser, err: Error) anyerror!void {
@@ -59,8 +59,10 @@ pub const Interface = struct {
 
         format_help: *const fn(
             context: *anyopaque,
+            p: *Parser,
             options: []const Option.Runtime,
             positionals: []const Positional.Runtime,
+            option_descriptions: std.StaticStringMap([:0]const u8),
             writer: *Writer,
         ) Writer.Error!void,
 
@@ -386,6 +388,11 @@ pub fn parse(p: *Parser, comptime T: type) (error{ParseError} || Allocator.Error
                     inline for (0.., opts) |i, comptime_opt| {
                        if (comptime_opt.long) |long| {
                            if (std.mem.eql(u8, long, opt.repr)) {
+                               if (getConfigOption(T, "help_option")) |ho| {
+                                   if (std.mem.eql(u8, comptime_opt.toRuntime().field_name, ho)) {
+                                       p.printHelp(0, .stdout(), convertToRuntime(opts), convertToRuntime(positionals), enumerateConfigOption(T, "option_descriptions"));
+                                   }
+                               }
                                try p.handleOption(comptime_opt, .{ .long = opt }, &@field(result.options, comptime_opt.field_name));
                                found_options.set(i);
                            }
@@ -401,6 +408,12 @@ pub fn parse(p: *Parser, comptime T: type) (error{ParseError} || Allocator.Error
                     inline for (0.., opts) |i, comptime_opt| {
                         if (comptime_opt.short) |short| {
                             if (short == opt.repr) {
+                                if (getConfigOption(T, "help_option")) |ho| {
+                                    const sm = getConfigOption(T, "short_mappings").?;
+                                    if (@hasDecl(sm, ho) and @field(sm, ho) == short) {
+                                       p.printHelp(0, .stdout(), convertToRuntime(opts), convertToRuntime(positionals), enumerateConfigOption(T, "option_descriptions"));
+                                    }
+                                }
                                 try p.handleOption(comptime_opt, .{ .short = opt }, &@field(result.options, comptime_opt.field_name));
                                 found_options.set(i);
                             }
@@ -438,6 +451,7 @@ pub fn parse(p: *Parser, comptime T: type) (error{ParseError} || Allocator.Error
     return result;
 }
 
+
 pub fn handleOption(
     p: *Parser,
     comptime opt: Option,
@@ -471,6 +485,14 @@ pub fn handleOption(
             dest_ptr.* = try values.parseValue(p, arg, .{ .option = opt });
         },
     }
+}
+
+fn printHelp(p: *Parser, exit_code: u8, file: std.fs.File, comptime options: []const Option.Runtime, positionals: []const Positional.Runtime, option_descriptions: std.StaticStringMap([]const u8)) noreturn {
+    defer std.posix.exit(exit_code);
+    var buf: [4096]u8 = undefined;
+    var file_writer = file.writer(&buf);
+    defer file_writer.interface.flush() catch {};
+    p.interface.formatHelp(options, positionals, option_descriptions, &file_writer.interface);
 }
 
 pub fn fail(p: *Parser, err: Error) error{ParseError} {
@@ -562,7 +584,7 @@ inline fn gatherOptionCandidates(comptime T: type) []const Option {
     return &as_const;
 }
 
-pub inline fn gatherPositionals(comptime T: type) []const Positional {
+inline fn gatherPositionals(comptime T: type) []const Positional {
     if (!@hasDecl(T, "positionals"))
         return &.{};
 
@@ -596,7 +618,7 @@ pub inline fn gatherPositionals(comptime T: type) []const Positional {
     return &as_const;
 }
 
-pub inline fn getConfigOption(comptime T: type, comptime option: []const u8) GetConfigOptionReturnType(T, option) {
+inline fn getConfigOption(comptime T: type, comptime option: []const u8) GetConfigOptionReturnType(T, option) {
     if (@hasDecl(T, "config") and @hasDecl(T.config, option))
         return @field(T.config, option)
     else
@@ -608,4 +630,46 @@ inline fn GetConfigOptionReturnType(comptime T: type, comptime option: []const u
         return ?@TypeOf(@field(T.config, option))
     else
         return @Type(.null);
+}
+
+inline fn convertToRuntime(comptime T: type, comptime slice: []const T) []const T.Runtime {
+    comptime var result: [slice.len]T.Runtime = undefined;
+    inline for (0.., slice) |i, comptime_elem|
+        result[i] = comptime_elem.toRuntime();
+
+    const as_const = result;
+    return &as_const;
+}
+
+fn EnumerateConfigOptionReturnType(comptime T: type, comptime config_option: []const u8) type {
+    const Child = blk: {
+        const conf = getConfigOption(T, config_option).?;
+        const decls = std.meta.declarations(conf);
+
+        if (decls.len == 0)
+            break :blk void
+        else
+            break :blk @TypeOf(@field(T, decls[0].name));
+    };
+
+    return std.StaticStringMap(Child);
+}
+
+inline fn enumerateConfigOption(comptime T: type, comptime config_option: []const u8) EnumerateConfigOptionReturnType(T, config_option) {
+    const conf = getConfigOption(T, config_option) orelse return .initComptime(.{});
+    const decls = std.meta.declarations(conf);
+
+    const Child = if (decls.len == 0)
+        void
+    else
+        @TypeOf(@field(T, decls[0].name));
+
+    comptime var map: [decls.len]struct { []const u8, Child } = undefined;
+
+    inline for (0.., decls) |i, decl|
+        map[i] = .{ decl.name, @field(conf, decl.name) };
+
+    const as_const = map;
+
+    return EnumerateConfigOptionReturnType(T, config_option).initComptime(as_const);
 }
