@@ -2,12 +2,13 @@ const std = @import("std");
 const assert = std.debug.assert;
 const builtin = @import("builtin");
 const options = @import("build_options");
+const values = @import("values.zig");
 
 const Type = std.builtin.Type;
 const Writer = std.Io.Writer;
 const Reader = std.Io.Reader;
 
-pub const args = @import("args.zig");
+pub const Args = @import("Args.zig");
 pub const Parser = @import("Parser.zig").Parser;
 pub const Lexer = @import("Lexer.zig");
 pub const fmt = @import("format.zig");
@@ -38,33 +39,26 @@ pub const Option = struct {
     /// field name will be equal to the option's long form, or the short form if no long form was provided.
     field_name: [:0]const u8,
 
+
     pub inline fn defaultValue(comptime option: Option) ?option.type {
         if (option.default_value_ptr) |dvp|
             return @as(*const option.type, @ptrCast(@alignCast(dvp))).*;
         return null;
     }
 
-    /// Converts `option` to an alternative that can easily be passed around at runtime.
-    /// This happens by removing any reference to `comptime`-only values, namely `type`
-    /// and `default_value`, converting them into stringly-typed representations. These
+    /// Converts `option` to a form that can easily be passed around at runtime.
+    /// This is done by removing any reference to `comptime`-only values, namely `type`
+    /// and `default_value`, replacing them with stringly-typed versions instead. These
     /// could *technically* be re-parsed to obtain the original type and default value
-    /// at runtime, but this is discouraged.
+    /// at runtime, but this is discouraged unless absolutely necessary.
     pub fn toRuntime(comptime option: Option) Runtime {
-        return .{
+        return comptime .{
             .short = option.short,
             .long = option.long,
             .type_name = types.name(option.type),
-            .default_value_repr = if (option.defaultValue()) |dv| blk: {
-                switch (@typeInfo(option.type)) {
-                    .@"struct", .@"union" => {
-                        if (@hasDecl(option.type, "format"))
-                            break :blk comptime std.fmt.comptimePrint("{f}", .{dv})
-                        else
-                            break :blk null;
-                    },
-                    else => break :blk null,
-                }
-            } else null,
+            .default_value_repr = if (option.defaultValue()) |dv|
+                values.toStringComptime(dv)
+            else null,
             .field_name = option.field_name,
         };
     }
@@ -108,13 +102,11 @@ pub const Positional = struct {
     /// [fieldName] will return `display` instead.
     field_name: [:0]const u8,
 
-    pub inline fn toRuntime(comptime positional: Positional, audience: Audience) Runtime {
+    pub inline fn toRuntime(comptime positional: Positional) Runtime {
         return .{
-            .info = positional.info,
             .field_name = positional.field_name,
-            .help_msg = positional.help_msg,
             .display = positional.display,
-            .type_name = types.name(positional.type, audience),
+            .type_name = types.name(positional.type),
         };
     }
 

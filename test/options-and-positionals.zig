@@ -1,4 +1,4 @@
-// args: --foo 29 --quux -b593  --zag=42
+// args: --foo 29 30 --quux -b593 AAAA --zag=42 false
 
 const std = @import("std");
 const argz = @import("argz");
@@ -13,6 +13,12 @@ const MyCli = struct {
         baz: []const u8,
         quux: bool,
         zag: u99 = 12, 
+    },
+
+    positionals: struct {
+        a: u32,
+        b: []const u8,
+        c: bool,
     },
 };
 
@@ -34,4 +40,8 @@ pub fn main() !void {
     assert(std.mem.eql(u8, "593", opts.options.baz));
     assert(opts.options.quux);
     assert(opts.options.zag == 42);
+
+    assert(opts.positionals.a == 30);
+    assert(std.mem.eql(u8, "AAAA", opts.positionals.b));
+    assert(!opts.positionals.c);
 }

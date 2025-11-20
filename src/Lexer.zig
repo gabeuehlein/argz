@@ -9,7 +9,7 @@
 //! This tokenizer requires that all arguments are valid UTF-8.
 
 const std = @import("std");
-const Args = @import("args.zig").Args;
+const Args = @import("Args.zig");
 const argz = @import("argz.zig");
 
 const assert = std.debug.assert;

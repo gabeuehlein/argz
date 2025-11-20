@@ -1,3 +1,9 @@
+//! A basic [Parser] implementation that should fit most use cases.
+//!
+//! Tokenization is done using the [Lexer] `struct`. This handles both
+//! short-style (POSIX) and long-style (GNU) named options and positional
+//! arguments.
+
 const std = @import("std");
 const argz = @import("../argz.zig");
 const assert = std.debug.assert;
@@ -172,7 +178,7 @@ found_force_stop: bool = false,
 no_force_stop: bool = false,
 allow_empty_word: bool = true,
 
-pub fn init(args: argz.args.Args) error{NoArguments,InvalidUtf8}!Default {
+pub fn init(args: argz.Args) error{NoArguments,InvalidUtf8}!Default {
    return .{
        .lexer = try .init(args),
    };

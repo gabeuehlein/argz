@@ -84,3 +84,41 @@ pub fn parseValueExplicitType(p: *Parser, value: []const u8, comptime context: C
         else => @compileError("TODO"),
     }
 }
+
+pub inline fn toStringComptime(comptime val: anytype) ?[:0]const u8 {
+    const comptimePrint = std.fmt.comptimePrint;
+    const ValType = @TypeOf(val);
+
+    return blk: switch (@typeInfo(ValType)) {
+        .@"struct", .@"union" => {
+            if (@hasDecl(@TypeOf(val), "format"))
+                break :blk comptimePrint("{f}", .{val})
+            else
+                break :blk null;
+        },
+        else => break :blk state: switch (@typeInfo(ValType)) {
+            .int, .float => comptimePrint("{d}", .{val}),
+            .pointer => |info| if (info.is_const and info.child == u8) {
+                if (info.sentinel() == 0)
+                    break :state val
+                else
+                    break :state val ++ .{0};
+            } else list: {
+                if (val.len == 0)
+                    break :blk "{}";
+                comptime var result: [:0]const u8 = "{" ++ (toStringComptime(val[0]) orelse break :state null);
+                inline for (val[1..]) |v| {
+                    result = result ++ ", ";
+                    result = result ++ (toStringComptime(v) orelse break :list null);
+                }
+                break :list result ++ "}";
+            },
+            .array => |arr| continue :state @typeInfo([]const arr.child),
+            .bool => if (val)
+                "true"
+            else
+                "false",
+            else => null, 
+        },
+    };
+}
