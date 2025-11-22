@@ -1,24 +1,31 @@
-// expect-fail
-// args: --long --two -TT
+// expect-exit-code: 1
+// args: --long --two -T -T
 // expected(stderr): error: option '-T' found multiple times
 
 const std = @import("std");
 const argz = @import("argz");
 
-const cfg: argz.Config = .{
-    .top_level_options = &.{
-        .init(void, null, "long", null, "a long option", .{}),
-        .init(void, null, "two", null, "option two", .{}),
-        .init(void, 'T', "three", null, "option three", .{}),
+pub const MyCli = struct {
+    options: struct {
+        long: bool,
+        two: bool,
+        three: bool,
     },
-    .mode = .{ .positionals = &.{ } },
-    .support_allocation = false,
+};
+
+pub const config = struct {
+    pub const options = struct {
+        pub const short_mappings = struct {
+            pub const three = 'T';
+        };
+    };
 };
 
 pub fn main() !void {
-    if(true) return;
-    var arg_parser: argz.Parser = try .init(argz.SystemArgs.init(), .{});
-    const opts = arg_parser.parse(cfg) catch std.process.exit(1);
+    var simple: argz.Parser.Interface.Simple = try .init(.system());
+
+    var parser: argz.Parser = .init(simple.interface(), .{ .program_name = "duplicate-short-flag" });
+    const opts = parser.parse(MyCli, config) catch std.process.exit(1);
     _ = opts;
     unreachable;
 }

@@ -1,19 +1,20 @@
 // args: "an argument"
 // expected(stdout): an argument
-// expected(stdout): IGNORE-LAST-NEWLINE
 
 const std = @import("std");
 const argz = @import("argz");
 
-const cfg: argz.Config = .{
-    .top_level_options = &.{},
-    .mode = .{ .positionals = &.{ .init([]const u8, "blah", "an argument", .{}) } },
-    .support_allocation = false,
+pub const MyCli = struct {
+    positionals: struct {
+        blah: []const u8,
+    },
 };
 
 pub fn main() !void {
-    if(true) return;
-    var arg_parser: argz.Parser = try .init(argz.SystemArgs.init(), .{});
-    const opts = try arg_parser.parse(cfg);
-    try std.io.getStdOut().writeAll(opts.positionals.blah);
+    var simple: argz.Parser.Interface.Simple = try .init(.system());
+
+    var parser: argz.Parser = .init(simple.interface(), .{ .program_name = "duplicate-long-flag" });
+    const opts: MyCli = try parser.parse(MyCli, struct {});
+    var stdout: std.fs.File = .stdout();
+    try stdout.writeAll(opts.positionals.blah);
 }

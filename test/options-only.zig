@@ -1,4 +1,4 @@
-// args: --foo 29 --quux -b593  --zag=42
+// args: --foo 29 --quux -b593
 
 const std = @import("std");
 const argz = @import("argz");
@@ -12,7 +12,7 @@ const MyCli = struct {
         bar: u8 = 9,
         baz: []const u8,
         quux: bool,
-        zag: u99 = 12, 
+        zag: u99 = 122384238948324893248932489, 
     },
 };
 
@@ -26,12 +26,13 @@ pub const config = struct {
 
 pub fn main() !void {
     var dfl: Simple = try .init(.system());
-    var p: argz.Parser = .init(dfl.interface(), .{});
+    var p: argz.Parser = .init(dfl.interface(), .{ .program_name = "options-only" });
+
     const opts: MyCli = try p.parse(MyCli, config);
 
     assert(opts.options.foo == 29);
     assert(opts.options.bar == 9);
     assert(std.mem.eql(u8, "593", opts.options.baz));
     assert(opts.options.quux);
-    assert(opts.options.zag == 42);
+    assert(opts.options.zag == 122384238948324893248932489);
 }

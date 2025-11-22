@@ -11,7 +11,6 @@ const Reader = std.Io.Reader;
 pub const Args = @import("Args.zig");
 pub const Parser = @import("Parser.zig").Parser;
 pub const Lexer = @import("Lexer.zig");
-pub const fmt = @import("format.zig");
 pub const types = @import("types.zig");
 
 pub const ColorMode = enum(u2) {
@@ -38,6 +37,8 @@ pub const Option = struct {
     /// The name of the field representing the option in the resulting option `struct`. If `null`, the
     /// field name will be equal to the option's long form, or the short form if no long form was provided.
     field_name: [:0]const u8,
+    /// Information about the option's usage.
+    info: ?[:0]const u8,
 
 
     pub inline fn defaultValue(comptime option: Option) ?option.type {
@@ -60,6 +61,7 @@ pub const Option = struct {
                 values.toStringComptime(dv)
             else null,
             .field_name = option.field_name,
+            .info = option.info,
         };
     }
 
@@ -68,13 +70,14 @@ pub const Option = struct {
         short: ?u21,
         /// The long form of the option. If equal to `null`, `short` must have a valid representation.
         long: ?[:0]const u8,
-        /// The type of the option. If equal to `void`, then the corresponding `struct` field will be a
-        /// boolean indicating whether this option was found in the argument list.
-        type_name: [:0]const u8,
+        /// The type of the option. `null` indicates no appropriate type name for a human reader. This
+        /// field will never be empty.
+        type_name: ?[:0]const u8,
         default_value_repr: ?[:0]const u8,
         /// The name of the field representing the option in the resulting option `struct`. If `null`, the
         /// field name will be equal to the option's long form, or the short form if no long form was provided.
         field_name: [:0]const u8,
+        info: ?[:0]const u8,
 
         pub fn format(rt: *const Runtime, writer: *Writer) Writer.Error!void {
             if (rt.long != null) {
@@ -104,14 +107,14 @@ pub const Positional = struct {
 
     pub inline fn toRuntime(comptime positional: Positional) Runtime {
         return .{
-            .field_name = positional.field_name,
-            .display = positional.display,
             .type_name = types.name(positional.type),
+            .display = positional.display,
+            .field_name = positional.field_name,
         };
     }
 
     pub const Runtime = struct {
-        type_name: [:0]const u8,
+        type_name: ?[:0]const u8,
         display: [:0]const u8,
         field_name: [:0]const u8,
     };

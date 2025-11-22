@@ -1,15 +1,10 @@
 const std = @import("std");
 const argz = @import("argz");
 
-const cfg: argz.Config = .{
-    .top_level_options = &.{},
-    .mode = .{ .positionals = &.{} },
-    .support_allocation = false,
-};
-
 pub fn main() !void {
-    if(true) return;
-    var arg_parser: argz.Parser = try .init(argz.SystemArgs.init(), .{});
-    const opts = try arg_parser.parse(cfg);
+    var simple: argz.Parser.Interface.Simple = try .init(.system());
+
+    var parser: argz.Parser = .init(simple.interface(), .{ .program_name = "duplicate-short-flag" });
+    const opts = parser.parse(struct {}, struct {}) catch std.process.exit(1);
     _ = opts;
 }

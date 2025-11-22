@@ -7,7 +7,7 @@ pub const Context = union(enum) {
     positional: argz.Positional,
     option: argz.Option,
 
-    fn toBadArgError(comptime ctx: Context, arg: []const u8) Parser.Error {
+    pub fn toBadArgError(comptime ctx: Context, arg: []const u8) Parser.Error {
         return switch (ctx) {
             .positional => |pos| .{ .invalid_positional = .{
                 .positional = comptime &pos.toRuntime(),

@@ -4,7 +4,9 @@
 //! differences in behavior between this one and a hand-rolled tokenizer.
 //!
 //! This tokenizes UNIX style options with GNU extensions (i.e. long options
-//! like `--foo=bar`). If support for Windows-style options is needed
+//! like `--foo=bar`). If support for DOS-style `/O` options are needed, see
+//! [DosTokenizer] instead. Note that DOS-style options are limited exclusively
+//! to what would be the short form of a UNIX option.
 //!
 //! This tokenizer requires that all arguments are valid UTF-8.
 
@@ -39,15 +41,17 @@ const State = enum {
 pub fn init(args: Args) error{NoArguments,InvalidUtf8}!Lexer {
     if (args.len == 0)
         return error.NoArguments;
+
     for (1..args.len) |i| {
         const arg = args.get(i);
         if (!std.unicode.utf8ValidateSlice(arg))
             return error.InvalidUtf8;
     }
+
     return .{ .args = args };
 }
 
-pub fn nextToken(lexer: *Lexer, tokenize_as_word: bool, allow_empty_word: bool, two_dash_is_word: bool) ?Parser.Token {
+pub fn next(lexer: *Lexer, allow_empty_word: bool) ?Parser.Token {
     if (lexer.argi == lexer.args.len )
         return null
     else if (lexer.subargi == lexer.args.get(lexer.argi).len) {
@@ -58,7 +62,7 @@ pub fn nextToken(lexer: *Lexer, tokenize_as_word: bool, allow_empty_word: bool, 
 
     const arg = lexer.args.get(lexer.argi);
 
-    const initial_state: State = if (tokenize_as_word)
+    const initial_state: State = if (lexer.found_force_stop)
         .word
     else if (lexer.subargi != 0)
         .short_option
@@ -89,11 +93,12 @@ pub fn nextToken(lexer: *Lexer, tokenize_as_word: bool, allow_empty_word: bool, 
         },
         .two_dash => {
             if (arg.len == 2) {
-                if (two_dash_is_word) {
+                if (lexer.found_force_stop) {
                     continue :state .word;
                 } else {
                     defer _ = lexer.loadNextArg();
-                    return .force_stop;
+                    lexer.found_force_stop = true;
+                    continue :state .word;
                 }
             } else {
                 continue :state .long_option;

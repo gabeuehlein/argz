@@ -27,12 +27,19 @@ pub const config = struct {
         pub const short_mappings = struct {
             pub const baz = 'b';
         };
+
+        pub const info_messages = struct {
+            pub const foo = "a number";
+            pub const bar = "a smaller number";
+            pub const baz = "text";
+            pub const zag = "a really big number";
+        };
     };
 };
 
 pub fn main() !void {
     var dfl: Simple = try .init(.system());
-    var p: argz.Parser = .init(dfl.interface(), .{});
+    var p: argz.Parser = .init(dfl.interface(), .{ .program_name = "options-and-positionals" });
     const opts: MyCli = try p.parse(MyCli, config);
 
     assert(opts.options.foo == 29);

@@ -11,7 +11,6 @@ const Option = argz.Option;
 const Positional = argz.Positional;
 const Allocator = std.mem.Allocator;
 const Args = @import("Args.zig");
-const format = @import("format.zig");
 const types=  @import("types.zig");
 const Writer = std.Io.Writer;
 
@@ -23,7 +22,7 @@ color_mode: argz.ColorMode = .detect,
 allocator: ?Allocator = null,
 stdout_config: std.Io.tty.Config,
 stderr_config: std.Io.tty.Config,
-program_name: ?[]const u8,
+program_name: []const u8,
 program_description: ?[]const u8,
 
 pub const Interface = struct {
@@ -38,10 +37,6 @@ pub const Interface = struct {
         return iface.vtable.argument(iface.context, allow_leading_dash);
     }
 
-    pub fn detached(iface: *Interface) error{NotSupported}!Detached {
-        return iface.vtable.detach(iface.context);
-    }
-
     pub fn formatHelp(
         iface: *Interface,
         options: []const Option.Runtime,
@@ -49,67 +44,46 @@ pub const Interface = struct {
         option_descriptions: std.StaticStringMap([:0]const u8),
         writer: *Writer,
     ) Writer.Error!void {
-        return iface.vtable.format_help(iface.context, options, positionals, option_descriptions, writer);
+        // FIXME: an `Interface` *really* shouldn't depend rely on having a concrete `Parser` containing it.
+        // Change the API to make a `Parser` an explicit argument instead.
+        return iface.vtable.format_help(iface.context, @fieldParentPtr("interface", iface), options, positionals, writer);
     }
 
-    pub fn handleError(iface: *Interface, parser: *Parser, err: Error) void {
-        return iface.vtable.handle_error(iface, parser, err);
+    pub fn handleError(iface: *Interface, parser: *const Parser, err: *const Error, writer: *Writer) error{HandlingFailed}!void {
+        return iface.vtable.handle_error(iface, parser, err, writer);
     }
 
     pub const VTable = struct {
         next: *const fn(context: *anyopaque) ?Token,
 
-        detach: *const fn(context: *anyopaque) error{NotSupported}!Detached,
-
         argument: *const fn(context: *anyopaque, allow_leading_dash: bool) ?[]const u8,
+
+        handle_error: *const fn(
+            context: *anyopaque,
+            parser: *const Parser,
+            err: *const Error,
+            writer: *Writer,
+        ) error{HandlingFailed}!void,
 
         format_help: *const fn(
             context: *anyopaque,
-            p: *Parser,
+            parser: *Parser,
             options: []const Option.Runtime,
             positionals: []const Positional.Runtime,
             option_descriptions: std.StaticStringMap([:0]const u8),
             writer: *Writer,
         ) Writer.Error!void,
-
-        handle_error: *const fn(
-            context: *anyopaque,
-            parser: *Parser,
-            err: Error,
-        ) error{HandlingFailed}!void,
     };
 
+    pub const Advanced = @import("Parser/advanced.zig").Advanced;
+
     pub const Simple = @import("Parser/Simple.zig");
-};
-
-/// A "detached" parser. As the name might suggest, this `struct` can operate
-/// independently of the [Interface] that created it. It is used to view tokens
-/// past what the parent `Interface` sees.
-///
-/// All [Interface] implmentations provided by `argz` support this `struct`, although
-/// it is not strictly required.
-pub const Detached = struct {
-    vtable: *const struct {
-        next: *const fn(context: *anyopaque) ?Token,
-        argument: *const fn(context: *anyopaque, allow_leading_dash: bool) ?[]const u8,
-    },
-    context: *anyopaque,
-
-    pub fn next(dt: *Detached) ?Token {
-        return dt.vtable.next(dt.context);
-    }
-
-    pub fn argument(dt: *Detached, allow_leading_dash: bool) ?[]const u8 {
-        return dt.vtable.argument(dt.context, allow_leading_dash);
-    }
 };
 
 pub const Token = union(Tag) {
     long_option: LongOpt,
     short_option: ShortOpt,
-    /// Also may include '--', which is typically treated as `.force_stop`,
     word: []const u8,
-    force_stop,
     err: TokenizeError,
 
     pub const Option = union(enum) {
@@ -166,7 +140,6 @@ pub const Token = union(Tag) {
         long_option,
         short_option,
         word,
-        force_stop,
         err,
     };
 };
@@ -175,7 +148,7 @@ pub const Options = struct {
     /// Whether to emit ANSI escape sequences to enable support for colored output.
     color_mode: argz.ColorMode = .detect,
     /// The name of the program that will be shown in descriptive help strings.
-    program_name: ?[]const u8 = null,
+    program_name: []const u8,
     /// A brief description of how the program should be used.
     program_description: ?[]const u8 = null,
     allocator: ?Allocator = null,
@@ -222,89 +195,13 @@ pub const Error = union(enum) {
     /// Payload is the display names of the required positionals.
     missing_positionals: []const Positional.Runtime,
     missing_required_option: *const Option.Runtime,
+    duplicate_short_option: u21,
+    duplicate_long_option: []const u8,
     /// Payload is the message.
     custom: []const u8,
     /// Identical to `custom`, except that [format] will *not* prepend an `"error: ..."`
     /// to the message and will not add coloration to the output.
     raw: []const u8,
-
-    pub fn fmt(err: *const Error, p: *Parser, audience: argz.Audience, tty_conf: std.Io.tty.Config) std.fmt.Alt(Data, Data.format) {
-        return std.fmt.alt(Data{ .err = err, .p = p, .audience = audience, .tty_conf = tty_conf }, .format);
-    }
-
-    pub const Data = struct {
-        p: *Parser,
-        err: *const Error,
-        audience: argz.Audience, 
-        tty_conf: std.Io.tty.Config,
-
-        pub fn format(data: Data, writer: *std.Io.Writer) Writer.Error!void {
-            const err, const audience, const tty_conf = .{ data.err, data.audience, data.tty_conf };
-            _ = audience; // TODO use this when error notes are reimplemented
-
-            if (data.err.* != .raw) 
-                writeColoredError(tty_conf, writer) catch return error.WriteFailed;
-
-            switch (err.*) {
-                .unexpected_arg_for_option => |info| {
-                    const use_long = info.option.long != null;
-                    if (use_long)
-                        assert(info.option.short != null);
-
-                    try writer.print("found unexpected argument '{s}' for option '{f}'\n", .{
-                        info.arg_string,
-                        info.option
-                    });
-                },
-                .expected_arg_for_option => |opt| {
-                    try writer.print("expected argument of type '{s}' for option '{f}'\n", .{opt.type_name, opt});
-                },
-                .invalid_arg_for_option => |info| {
-                    try writer.print("argument '{s}' to flag '{f}' is invalid\n", .{ info.arg_repr, info.option });
-                },
-                .unknown_long_option => |info| {
-                    try writer.print("unknown option '--{s}'\n", .{info.found});
-                },
-                .unknown_short_option => |info| {
-                    try writer.print("unknown option '-{u}'\n", .{info.found});
-                },
-                .invalid_positional => |info| {
-                    try writer.print("invalid argument '{s}' for positional '{s}'\n", .{
-                        info.arg_repr,
-                        info.positional.display,
-                    });
-                },
-                .too_many_positionals => |word| {
-                    try writer.print("found extra positional '{s}'\n", .{word});
-                    // TODO implement these error notes.
-                    // var first_word: bool = false;
-                    // while (data.p.interface.next()) |arg| {
-                    //    switch (arg) {
-                    //        .word => |word| {
-                    //            if (!first_word) {
-                    //                try writer.print("found extra positional '{s}'", .{word});
-                    //                first_word = true;
-                    //            }
-                    //        },
-                    //        else => {},
-                    //    }
-                    // }
-                    // TODO add notes for other extra positionals provided
-                },
-                .missing_positionals => |missing| {
-                    try writer.print("missing positional '{s}'\n", .{missing[0].display});
-                    // TODO add notes for other misssng positionals
-                },
-                .missing_required_option => |missing| {
-                    try writer.print("missing required option '{f}'\n", .{missing});
-                },
-                .custom, .raw => |msg| {
-                    try writer.writeAll(msg);
-                    try writer.writeByte('\n');
-                },
-            }
-        }
-    };
 
     /// Returns a statically-allocated buffer to use for specialized
     /// formatting of errors beyond what can be done using the variants
@@ -318,7 +215,8 @@ pub const Error = union(enum) {
     }
 
     /// Asserts that the stack buffer has already been lended out via a call
-    /// to [getStackBuffer].
+    /// to [getStackBuffer]. The `threadlocal` stack buffer that was previously
+    /// lended out is undefined after a call to this function.
     pub fn releaseStackBuffer() void {
         assert(stack_buffer_granted);
         stack_buffer_granted = false;
@@ -352,14 +250,6 @@ pub const Error = union(enum) {
         };
     }
 
-    fn writeColoredError(tty_config: std.Io.tty.Config, writer: *Writer) (Writer.Error || error{Unexpected})!void {
-        try tty_config.setColor(writer, .bold);
-        try tty_config.setColor(writer, .red);
-        try writer.writeAll("error:");
-        try tty_config.setColor(writer, .reset);
-        try writer.writeByte(' ');
-    }
-
     /// Global, per-thread stack-allocated buffer reserved for use in formatting errors.
     threadlocal var stack_buffer: [4096]u8 = undefined;
     /// Whether `stack_buffer` has already been lended out. Set to `true` and `false`
@@ -377,6 +267,7 @@ pub fn init(interface: Interface, options: Options) Parser {
         },
         .force => .{ .escape_codes, .escape_codes },
     };
+
     return .{
         .stdout_config = stdout_color,
         .stderr_config = stderr_color,
@@ -403,6 +294,9 @@ pub fn parseAdvanced(
     comptime options: []const Option,
     comptime positionals: []const Positional
 ) error{ParseError}!T {
+    // TODO tune this
+    @setEvalBranchQuota(200 * options.len + 200 * positionals.len);
+
     var result: T = undefined;
 
     var found_options = if (@hasField(T, "options"))
@@ -411,15 +305,16 @@ pub fn parseAdvanced(
         {};
 
     const OptsConfig = getConfigOption(Config, "options") orelse struct {};
+    const DefaultValueCallbacks = getConfigOption(OptsConfig, "default_value_callbacks") orelse struct {};
     const PositionalConfig = getConfigOption(Config, "positionals") orelse struct {};
     _ = PositionalConfig;
 
     comptime {
         if (@hasField(T, "options") and options.len == 0)
-            @compileError("redundant 'options' field with zero fields of its own");
+            @compileError("unnecessary 'options' field with zero fields of its own");
 
         if (@hasField(T, "positionals") and positionals.len == 0)
-            @compileError("redundant 'positionals' field with zero fields of its own");
+            @compileError("unnecessary 'positionals' field with zero fields of its own");
     }
 
     var positional_index: usize = 0;
@@ -431,11 +326,19 @@ pub fn parseAdvanced(
                     inline for (0.., options) |i, comptime_opt| {
                        if (comptime_opt.long) |long| {
                            if (std.mem.eql(u8, long, opt.repr)) {
-                               if (getConfigOption(T, "help_option")) |ho| {
-                                   if (std.mem.eql(u8, comptime_opt.toRuntime().field_name, ho)) {
-                                       p.printHelp(0, .stdout(), convertToRuntime(opts), convertToRuntime(positionals), enumerateConfigOption(T, "option_descriptions"));
-                                   }
-                               }
+                                if (found_options.isSet(i))
+                                    return p.fail(.{ .duplicate_long_option = long });
+                                if (getConfigOption(OptsConfig, "help_option")) |ho| {
+                                    if (comptime std.mem.eql(u8, comptime_opt.field_name, ho)) {
+                                        var buf: [4096]u8 = undefined;
+                                        var stdout: std.fs.File = .stdout();
+                                        var w = stdout.writer(&buf);
+                                        defer w.interface.flush() catch {};
+
+                                        p.interface.formatHelp(toRuntimeSlice(options), toRuntimeSlice(positionals), &w.interface) catch {};
+                                        std.process.exit(0);
+                                    }
+                                }
                                try p.handleOption(comptime_opt, .{ .long = opt }, &@field(result.options, comptime_opt.field_name));
                                found_options.set(i);
                                continue :top;
@@ -455,10 +358,17 @@ pub fn parseAdvanced(
                     inline for (0.., options) |i, comptime_opt| {
                         if (comptime_opt.short) |short| {
                             if (short == opt.repr) {
-                                if (getConfigOption(T, "help_option")) |ho| {
-                                    const sm = getConfigOption(T, "short_mappings").?;
-                                    if (@hasDecl(sm, ho) and @field(sm, ho) == short) {
-                                       p.printHelp(0, .stdout(), convertToRuntime(opts), convertToRuntime(positionals), enumerateConfigOption(T, "option_descriptions"));
+                                if (found_options.isSet(i))
+                                    return p.fail(.{ .duplicate_short_option = short });
+                                if (getConfigOption(OptsConfig, "help_option")) |ho| {
+                                    if (comptime std.mem.eql(u8, comptime_opt.field_name, ho)) {
+                                        var buf: [4096]u8 = undefined;
+                                        var stdout: std.fs.File = .stdout();
+                                        var w = stdout.writer(&buf);
+                                        defer w.interface.flush() catch {};
+
+                                        p.interface.formatHelp(toRuntimeSlice(options), toRuntimeSlice(positionals), &w.interface) catch {};
+                                        std.process.exit(0);
                                     }
                                 }
                                 try p.handleOption(comptime_opt, .{ .short = opt }, &@field(result.options, comptime_opt.field_name));
@@ -474,7 +384,6 @@ pub fn parseAdvanced(
                     .candidates = &.{},
                 } });
             },
-            .force_stop => {},
             .word => |word| {
                 if (positionals.len == 0)
                     return p.fail(.{ .too_many_positionals = word });
@@ -499,6 +408,8 @@ pub fn parseAdvanced(
                 inline 0...options.len - 1 => |i| {
                     if (options[i].defaultValue()) |dv|
                         @field(result.options, options[i].field_name) = dv
+                    else if (getConfigOption(DefaultValueCallbacks, options[i].field_name)) |cb|
+                        @field(result.options, options[i].field_name) = try cb(p)
                     else
                         return p.fail(.{ .missing_required_option = comptime &options[i].toRuntime() });
                 },
@@ -580,7 +491,7 @@ fn printHelp(p: *Parser, exit_code: u8, file: std.fs.File, comptime options: []c
 }
 
 pub fn fail(p: *Parser, err: Error) error{ParseError} {
-    var buf: [64]u8 = undefined;
+    var buf: [128]u8 = undefined;
 
     var stderr = std.fs.File.stderr();
     stderr.lock(.exclusive) catch return error.ParseError;
@@ -589,7 +500,7 @@ pub fn fail(p: *Parser, err: Error) error{ParseError} {
     var w = stderr.writer(&buf);
     defer w.interface.flush() catch {};
 
-    w.interface.print("{f}", err.fmt(p, .default, p.stderr_config)) catch {};
+    p.interface.handleError(p, &err, &w.interface) catch {};
 
     return error.ParseError;
 }
@@ -601,7 +512,17 @@ pub fn failFmt(p: *Parser, comptime format_string: []const u8, args: anytype) er
 }
 
 pub fn fatal(p: *const Parser, comptime fmt: []const u8, args: anytype) noreturn {
-    format.emitErr(std.io.getStdErr().writer().any(), p.stderr_config, fmt, args) catch {};
+    const err: Error = .initFmtStatic(p.stderr_config, fmt, args);
+    var buf: [128]u8 = undefined;
+
+    var stderr = std.fs.File.stderr();
+    stderr.lock(.exclusive) catch {};
+    defer stderr.unlock();
+
+    var w = stderr.writer(&buf);
+    defer w.interface.flush() catch {};
+
+    p.interface.handleError(p, &err, &w.interface) catch {};
     std.process.exit(1);
 }
 
@@ -628,6 +549,7 @@ inline fn gatherOptionCandidates(comptime T: type, comptime Config: type) []cons
             .type = field.type,
             .long = null,
             .short = null,
+            .info = null,
         };
 
         if (substitute_underscore_with_minus) {
@@ -659,6 +581,11 @@ inline fn gatherOptionCandidates(comptime T: type, comptime Config: type) []cons
                     opt.long = null;
                 opt.short = @field(ShortMappings, field.name);
             }
+        }
+
+        if (getConfigOption(Config, "info_messages")) |InfoMessages| {
+            if (@hasDecl(InfoMessages, field.name))
+                opt.info = @field(InfoMessages, field.name);
         }
 
         result[i] = opt;
@@ -716,44 +643,14 @@ inline fn GetConfigOptionReturnType(comptime Config: type, comptime option: []co
         return @Type(.null);
 }
 
-inline fn convertToRuntime(comptime T: type, comptime slice: []const T) []const T.Runtime {
-    comptime var result: [slice.len]T.Runtime = undefined;
-    inline for (0.., slice) |i, comptime_elem|
-        result[i] = comptime_elem.toRuntime();
+inline fn toRuntimeSlice(comptime slice: anytype) []const @TypeOf(slice[0]).Runtime {
+    comptime var space: [slice.len]@TypeOf(slice[0]).Runtime = undefined;
 
-    const as_const = result;
-    return &as_const;
-}
+    comptime{
+        for (slice, 0..) |elem, i|
+            space[i] = elem.toRuntime();
+    }
 
-fn EnumerateConfigOptionReturnType(comptime T: type, comptime config_option: []const u8) type {
-    const Child = blk: {
-        const conf = getConfigOption(T, config_option).?;
-        const decls = std.meta.declarations(conf);
-
-        if (decls.len == 0)
-            break :blk void
-        else
-            break :blk @TypeOf(@field(T, decls[0].name));
-    };
-
-    return std.StaticStringMap(Child);
-}
-
-inline fn enumerateConfigOption(comptime T: type, comptime config_option: []const u8) EnumerateConfigOptionReturnType(T, config_option) {
-    const conf = getConfigOption(T, config_option) orelse return .initComptime(.{});
-    const decls = std.meta.declarations(conf);
-
-    const Child = if (decls.len == 0)
-        void
-    else
-        @TypeOf(@field(T, decls[0].name));
-
-    comptime var map: [decls.len]struct { []const u8, Child } = undefined;
-
-    inline for (0.., decls) |i, decl|
-        map[i] = .{ decl.name, @field(conf, decl.name) };
-
-    const as_const = map;
-
-    return EnumerateConfigOptionReturnType(T, config_option).initComptime(as_const);
+    const result = space;
+    return &result;
 }

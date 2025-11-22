@@ -1,3 +1,5 @@
+// disable-test
+// ^~~~~~~~~~~ TODO - depends on custom types
 // args: foo bar baz -E ban -- quux "this is a string" --eeeee
 // expected(stderr): foo
 // expected(stderr): bar

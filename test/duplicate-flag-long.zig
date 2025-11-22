@@ -1,23 +1,31 @@
-// expect-fail
 // args: --long --two --long
+// expect-exit-code: 1
 // expected(stderr): error: option '--long' found multiple times
 
 const std = @import("std");
 const argz = @import("argz");
 
-const cfg: argz.Config = .{
-    .top_level_options = &.{
-        .init(void, null, "long", null, "a long option", .{}),
-        .init(void, null, "two", null, "option two", .{}),
+pub const MyCli = struct {
+    options: struct {
+        long: bool,
+        two: bool,
     },
-    .mode = .{ .positionals = &.{ } },
-    .support_allocation = false,
+};
+
+pub const config = struct {
+    pub const options = struct {
+        pub const info_messages = struct {
+            pub const long = "a long option";
+            pub const two = "option two";
+        };
+    };
 };
 
 pub fn main() !void {
-    if(true) return;
-    var arg_parser: argz.Parser = try .init(argz.SystemArgs.init(), .{});
-    const opts = arg_parser.parse(cfg) catch std.process.exit(1);
+    var simple: argz.Parser.Interface.Simple = try .init(.system());
+
+    var parser: argz.Parser = .init(simple.interface(), .{ .program_name = "duplicate-long-flag" });
+    const opts = parser.parse(MyCli, config) catch std.process.exit(1);
     _ = opts;
     unreachable;
 }

@@ -86,7 +86,14 @@ fn createTests(b: *std.Build, step: *std.Build.Step, target: std.Build.ResolvedT
     }
 }
 
-fn buildTest(b: *std.Build, step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, argz_module: *std.Build.Module, file: std.Build.LazyPath) !void {
+fn buildTest(
+    b: *std.Build,
+    step: *std.Build.Step,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    argz_module: *std.Build.Module,
+    file: std.Build.LazyPath,
+) !void {
     const gpa = b.allocator;
 
     var arena_allocator: std.heap.ArenaAllocator = .init(gpa);
@@ -124,9 +131,12 @@ fn buildTest(b: *std.Build, step: *std.Build.Step, target: std.Build.ResolvedTar
     while (true) {
         defer line_buf.clearRetainingCapacity();
         _ = try reader.streamDelimiter(&line_buf.writer, '\n');
+        try reader.discardAll(1); // eat junk '\n'
         const line = line_buf.written();
 
-        if (std.mem.startsWith(u8, line, "// args:")) {
+        if (std.mem.eql(u8, line, "// disable-test")) {
+            return;
+        } if (std.mem.startsWith(u8, line, "// args:")) {
             const rest = line["// args:".len..];
             try parseArgs(gpa, rest, file, exe);
         } else if (std.mem.startsWith(u8, line, "// expected(stdout):")) {
@@ -149,8 +159,9 @@ fn buildTest(b: *std.Build, step: *std.Build.Step, target: std.Build.ResolvedTar
     exe.expectStdErrEqual(stderr_expected_string.items);
 }
 
-// Arbitrary escape sequences may be embedded in `string`, e.g. `foo bar\x30 baz` is the same as `foo bar0 baz`. The newline is
-// included, unless the next line contains only the string `IGNORE-LAST-NEWLINE`.
+// Arbitrary escape sequences may be embedded in `string`, e.g. `foo bar\x30 baz`
+// is the same as `foo bar0 baz`. A newline is implicitly added to `array_list`
+// before the tokenized string if `array_list` is not empty.
 fn tokenizeExpectedString(gpa: Allocator, string: []const u8, path: std.Build.LazyPath, array_list: *std.ArrayList(u8)) !void {
     const trimmed = blk: {
         var trimmed_end = std.mem.trimRight(u8, string, &std.ascii.whitespace);
@@ -160,14 +171,11 @@ fn tokenizeExpectedString(gpa: Allocator, string: []const u8, path: std.Build.La
         }
         break :blk trimmed_end;
     };
-    if (std.mem.eql(u8, trimmed, "IGNORE-LAST-NEWLINE")) {
-        if (array_list.pop()) |chr| {
-            if (chr != '\n')
-                std.debug.panic("path {s} has IGNORE-LAST-NEWLINE when previous character was not a newline, it is '{c}'", .{ path.getDisplayName(), chr });
-        } else std.debug.panic("path {s} contains IGNORE-LAST-NEWLINE as the first expected line", .{path.getDisplayName()});
-        return;
-    }
     var i: usize = 0;
+
+    if (array_list.items.len != 0)
+        try array_list.append(gpa, '\n');
+
     while (i < trimmed.len) : (i += 1) {
         if (trimmed[i] == '\\') {
             const char_literal = std.zig.string_literal.parseEscapeSequence(string, &i);
@@ -182,7 +190,6 @@ fn tokenizeExpectedString(gpa: Allocator, string: []const u8, path: std.Build.La
             try array_list.append(gpa, trimmed[i]);
         }
     }
-    try array_list.append(gpa, '\n');
 }
 
 fn parseArgs(gpa: std.mem.Allocator, string: []const u8, path: std.Build.LazyPath, run_step: *std.Build.Step.Run) !void {
