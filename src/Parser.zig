@@ -39,14 +39,12 @@ pub const Interface = struct {
 
     pub fn formatHelp(
         iface: *Interface,
+        parser: *Parser,
         options: []const Option.Runtime,
         positionals: []const Positional.Runtime,
-        option_descriptions: std.StaticStringMap([:0]const u8),
         writer: *Writer,
     ) Writer.Error!void {
-        // FIXME: an `Interface` *really* shouldn't depend rely on having a concrete `Parser` containing it.
-        // Change the API to make a `Parser` an explicit argument instead.
-        return iface.vtable.format_help(iface.context, @fieldParentPtr("interface", iface), options, positionals, writer);
+        return iface.vtable.format_help(iface.context, parser, options, positionals, writer);
     }
 
     pub fn handleError(iface: *Interface, parser: *const Parser, err: *const Error, writer: *Writer) error{HandlingFailed}!void {
@@ -70,7 +68,6 @@ pub const Interface = struct {
             parser: *Parser,
             options: []const Option.Runtime,
             positionals: []const Positional.Runtime,
-            option_descriptions: std.StaticStringMap([:0]const u8),
             writer: *Writer,
         ) Writer.Error!void,
     };
@@ -335,7 +332,7 @@ pub fn parseAdvanced(
                                         var w = stdout.writer(&buf);
                                         defer w.interface.flush() catch {};
 
-                                        p.interface.formatHelp(toRuntimeSlice(options), toRuntimeSlice(positionals), &w.interface) catch {};
+                                        p.interface.formatHelp(p, toRuntimeSlice(Option, options), toRuntimeSlice(Positional, positionals), &w.interface) catch {};
                                         std.process.exit(0);
                                     }
                                 }
@@ -367,7 +364,7 @@ pub fn parseAdvanced(
                                         var w = stdout.writer(&buf);
                                         defer w.interface.flush() catch {};
 
-                                        p.interface.formatHelp(toRuntimeSlice(options), toRuntimeSlice(positionals), &w.interface) catch {};
+                                        p.interface.formatHelp(p, toRuntimeSlice(Option, options), toRuntimeSlice(Positional, positionals), &w.interface) catch {};
                                         std.process.exit(0);
                                     }
                                 }
@@ -643,8 +640,8 @@ inline fn GetConfigOptionReturnType(comptime Config: type, comptime option: []co
         return @Type(.null);
 }
 
-inline fn toRuntimeSlice(comptime slice: anytype) []const @TypeOf(slice[0]).Runtime {
-    comptime var space: [slice.len]@TypeOf(slice[0]).Runtime = undefined;
+inline fn toRuntimeSlice(comptime T: type, comptime slice: []const T) []const T.Runtime {
+    comptime var space: [slice.len]T.Runtime = undefined;
 
     comptime{
         for (slice, 0..) |elem, i|

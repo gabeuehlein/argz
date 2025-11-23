@@ -122,7 +122,7 @@ pub const BasicHelpFormatter = struct {
                 break :blk max;
             };
 
-            try writer.writeAll("[options]:\n");
+            try writer.writeAll("options:\n");
 
             for (opts) |opt| {
                 try writer.splatByteAll(' ', 4);
@@ -161,6 +161,7 @@ pub const BasicHelpFormatter = struct {
                 try writer.writeByte('\n');
             }
         }
+
         writer.flush() catch {};
     }
 };

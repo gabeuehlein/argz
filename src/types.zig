@@ -5,7 +5,7 @@ const assert = std.debug.assert;
 pub inline fn name(comptime T: type) ?[:0]const u8 {
     return comptime switch (@typeInfo(T)) {
         .void => null,
-        .bool => "true | false",
+        .bool => "bool",
         .int => "integer",
         .float => "number",
         .array => |arr| blk: {
